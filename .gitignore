@@ -1,0 +1,21 @@
+/target/
+crates/game/target/
+
+# Rust/editor noise
+*.rs.bk
+.idea/
+.vscode/
+
+# Build artifacts
+**/*.dll
+**/*.pdb
+**/*.exe
+**/*.lib
+**/*.exp
+
+# Local/generated previews
+examples/nightreign-style-hud/atlas-preview/
+
+# OS files
+Thumbs.db
+Desktop.ini
