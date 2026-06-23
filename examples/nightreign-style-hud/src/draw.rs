@@ -519,6 +519,71 @@ fn draw_ironeye_precision_reticle(
     }
 }
 
+fn draw_wylder_skill_lock_ui(
+    ui: &Ui,
+    snapshot: &HudSnapshot,
+    texture_id: Option<TextureId>,
+    scale: f32,
+) {
+    if !snapshot.wylder_skill_lock_active {
+        return;
+    }
+
+    let viewport = ui.io().display_size;
+    let base_center = snapshot
+        .wylder_skill_lock_pos
+        .unwrap_or([viewport[0] * 0.5, viewport[1] * 0.5]);
+    let center = [
+        base_center[0],
+        base_center[1] + WYLDER_SKILL_LOCK_Y_OFFSET * scale,
+    ];
+    let half = WYLDER_SKILL_LOCK_HALF_SIZE * scale * snapshot.wylder_skill_lock_scale;
+    let color = if snapshot.wylder_skill_lock_has_target {
+        ImColor32::from_rgba(255, 255, 255, 235)
+    } else {
+        ImColor32::from_rgba(255, 64, 58, 235)
+    };
+
+    if let Some(texture_id) = texture_id {
+        draw_centered_texture(ui, center, half, texture_id, color);
+        return;
+    }
+
+    let draw = ui.get_foreground_draw_list();
+    draw.add_circle(center, half * 0.62, color)
+        .num_segments(72)
+        .thickness(2.2 * scale)
+        .build();
+    draw.add_line(
+        [center[0] - half * 0.72, center[1]],
+        [center[0] - half * 0.28, center[1]],
+        color,
+    )
+    .thickness(1.8 * scale)
+    .build();
+    draw.add_line(
+        [center[0] + half * 0.28, center[1]],
+        [center[0] + half * 0.72, center[1]],
+        color,
+    )
+    .thickness(1.8 * scale)
+    .build();
+    draw.add_line(
+        [center[0], center[1] - half * 0.72],
+        [center[0], center[1] - half * 0.28],
+        color,
+    )
+    .thickness(1.8 * scale)
+    .build();
+    draw.add_line(
+        [center[0], center[1] + half * 0.28],
+        [center[0], center[1] + half * 0.72],
+        color,
+    )
+    .thickness(1.8 * scale)
+    .build();
+}
+
 #[allow(dead_code)]
 fn draw_ironeye_camera_debug() {
     let Some(lines) = ironeye_camera_debug_lines() else {
@@ -1144,6 +1209,8 @@ fn snap_px(value: f32) -> f32 {
 const IRONEYE_ATLAS_SLOTS: usize = 7;
 const IRONEYE_RETICLE_ATLAS_SLOTS: [usize; 3] = [0, 1, 2];
 const IRONEYE_WEAKNESS_ATLAS_SLOTS: [usize; 4] = [3, 4, 5, 6];
+const WYLDER_SKILL_LOCK_HALF_SIZE: f32 = 116.0;
+const WYLDER_SKILL_LOCK_Y_OFFSET: f32 = -40.0;
 const SCHOLAR_ENEMY_ATLAS_SLOTS: usize = 5;
 const SCHOLAR_ENEMY_FULL_ATLAS_SLOT: usize = 0;
 const SCHOLAR_ENEMY_POINTER_ATLAS_SLOT: usize = 1;

@@ -105,6 +105,13 @@ runtime writes `880005` for ultimate readiness.
 - Marker: `880000`
 - Skill: 2 charges, 8s per charge.
 - Ultimate: 335s base cooldown, discounted use supported.
+- Held-skill lock UI:
+  - Apply `880030` to the player while the skill is being held/aimed.
+  - The HUD uses `Wylder_Skill_Lock.png`.
+  - Valid enemies and wall/ground ray hits are shown in the default color.
+  - No valid target falls back to a red center reticle.
+  - The reticle attaches to the selected enemy or ray-hit point and scales by
+    distance: close targets are larger, far targets are smaller.
 
 ### Guardian
 

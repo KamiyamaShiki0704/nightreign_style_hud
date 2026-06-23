@@ -107,6 +107,7 @@ struct IconSet {
     revenant: RevenantIconSet,
     recluse: RecluseIconSet,
     scholar: ScholarIconSet,
+    wylder_skill_lock: Option<TextureId>,
     multi_locking: Option<TextureId>,
 }
 
@@ -119,6 +120,7 @@ impl Default for IconSet {
             revenant: RevenantIconSet::default(),
             recluse: RecluseIconSet::default(),
             scholar: ScholarIconSet::default(),
+            wylder_skill_lock: None,
             multi_locking: None,
         }
     }
@@ -155,6 +157,10 @@ impl IconSet {
             ),
             enemy_atlas: load_scholar_enemy_atlas(render_context),
         };
+        self.wylder_skill_lock = load_raw_texture(
+            render_context,
+            include_bytes!("../assets/Wylder_Skill_Lock.png"),
+        );
         self.multi_locking = load_raw_texture(
             render_context,
             include_bytes!("../assets/MultipleLocking.png"),

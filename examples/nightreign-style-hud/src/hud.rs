@@ -160,6 +160,13 @@ impl ImguiRenderLoop for NightreignStyleHud {
                 now,
                 self.animation_start,
             );
+        } else if role == Role::Wylder {
+            draw_wylder_skill_lock_ui(
+                ui,
+                &snapshot,
+                self.icons.wylder_skill_lock,
+                self.scale,
+            );
         } else if role == Role::Revenant {
             draw_revenant_static_summon_ui(
                 ui,

@@ -8,6 +8,10 @@ struct HudSnapshot {
     skill_ready: bool,
     skill_top_down: bool,
     skill_count: Option<usize>,
+    wylder_skill_lock_active: bool,
+    wylder_skill_lock_has_target: bool,
+    wylder_skill_lock_pos: Option<[f32; 2]>,
+    wylder_skill_lock_scale: f32,
     ironeye_precision_aiming: bool,
     ironeye_weakness_marks: [IroneyeWeaknessSnapshot; IRONEYE_WEAKNESS_MAX_TARGETS],
     ironeye_weakness_bursts: [IroneyeWeaknessBurstSnapshot; IRONEYE_WEAKNESS_MAX_BURSTS],
@@ -70,6 +74,10 @@ struct ChargeState {
     scholar_enemy_effect_targets: Vec<FieldInsHandle>,
     duchess_snapshots: HashMap<usize, DuchessReplaySnapshot>,
     recluse_outputs_clear_at: Option<Instant>,
+    wylder_skill_lock_active: bool,
+    wylder_skill_lock_has_target: bool,
+    wylder_skill_lock_pos: Option<[f32; 2]>,
+    wylder_skill_lock_scale: f32,
     revenant_active_summon: Option<usize>,
     revenant_effect_mask: u8,
     revenant_summon_hp: [f32; REVENANT_SUMMON_COUNT],
@@ -167,6 +175,10 @@ impl ChargeState {
             scholar_enemy_effect_targets: Vec::new(),
             duchess_snapshots: HashMap::new(),
             recluse_outputs_clear_at: None,
+            wylder_skill_lock_active: false,
+            wylder_skill_lock_has_target: false,
+            wylder_skill_lock_pos: None,
+            wylder_skill_lock_scale: 1.0,
             revenant_active_summon: None,
             revenant_effect_mask: 0,
             revenant_summon_hp: [1.0; REVENANT_SUMMON_COUNT],
@@ -255,6 +267,7 @@ impl ChargeState {
             self.recluse_lock_debug_points = [None; 5];
         }
         self.update_scholar_targets(world_chr_man, role, &active_effects, delta);
+        self.update_wylder_skill_lock(world_chr_man, role, &active_effects);
         self.update_scholar_sympathy(world_chr_man, role, &active_effects, locked_on_enemy, now);
         self.update_ironeye_weakness(world_chr_man, role, now);
         self.update_duchess_replay_history(world_chr_man, role);
@@ -316,6 +329,10 @@ impl ChargeState {
         self.recluse_lock_damage_module = None;
         self.recluse_lock_pos = None;
         self.recluse_lock_debug_points = [None; 5];
+        self.wylder_skill_lock_active = false;
+        self.wylder_skill_lock_has_target = false;
+        self.wylder_skill_lock_pos = None;
+        self.wylder_skill_lock_scale = 1.0;
         self.scholar_targets.clear();
         self.scholar_observing = false;
         self.scholar_sympathy_hp.clear();
@@ -999,6 +1016,25 @@ impl ChargeState {
         }
         self.scholar_targets
             .retain(|_, target| target.progress > 0.001 || target.visible);
+    }
+
+    fn update_wylder_skill_lock(
+        &mut self,
+        world_chr_man: &WorldChrMan,
+        role: Role,
+        active_effects: &[i32],
+    ) {
+        self.wylder_skill_lock_active = role == Role::Wylder
+            && active_effects.contains(&role_config(Role::Wylder).effect(SP_WYLDER_SKILL_LOCK));
+        let target = self
+            .wylder_skill_lock_active
+            .then(|| wylder_skill_lock_target_pos(world_chr_man))
+            .flatten();
+        self.wylder_skill_lock_pos = target.map(|(pos, _)| pos);
+        self.wylder_skill_lock_scale = target
+            .map(|(_, distance)| wylder_skill_lock_distance_scale(distance))
+            .unwrap_or(1.0);
+        self.wylder_skill_lock_has_target = self.wylder_skill_lock_pos.is_some();
     }
 
     fn update_ironeye_weakness(&mut self, world_chr_man: &mut WorldChrMan, role: Role, now: Instant) {
@@ -2050,6 +2086,17 @@ impl ChargeState {
             skill_ready: skill_ready_count > 0,
             skill_top_down,
             skill_count,
+            wylder_skill_lock_active: config.role == Role::Wylder && self.wylder_skill_lock_active,
+            wylder_skill_lock_has_target: config.role == Role::Wylder
+                && self.wylder_skill_lock_has_target,
+            wylder_skill_lock_pos: (config.role == Role::Wylder)
+                .then_some(self.wylder_skill_lock_pos)
+                .flatten(),
+            wylder_skill_lock_scale: if config.role == Role::Wylder {
+                self.wylder_skill_lock_scale
+            } else {
+                1.0
+            },
             ironeye_precision_aiming: config.role == Role::Ironeye
                 && IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed),
             ironeye_weakness_marks,
@@ -2159,6 +2206,146 @@ impl ChargeState {
                 .count(),
         }
     }
+}
+
+fn wylder_skill_lock_target_pos(world_chr_man: &WorldChrMan) -> Option<([f32; 2], f32)> {
+    let Some(player) = world_chr_man.main_player.as_ref() else {
+        return None;
+    };
+    wylder_skill_lock_enemy_target_pos(world_chr_man, player)
+        .or_else(|| wylder_skill_lock_wall_target_pos(player))
+}
+
+fn wylder_skill_lock_enemy_target_pos(
+    world_chr_man: &WorldChrMan,
+    player: &PlayerIns,
+) -> Option<([f32; 2], f32)> {
+    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
+    let mut scanned = 0usize;
+    let mut best: Option<([f32; 2], f32, f32)> = None;
+    for entry in world_chr_man.chr_inses_by_distance.iter() {
+        if scanned >= WYLDER_SKILL_LOCK_MAX_DISTANCE_ENTRIES {
+            break;
+        }
+        scanned += 1;
+
+        let chr = unsafe { entry.chr_ins.as_ref() };
+        if scholar_reject_reason(chr).is_some() {
+            continue;
+        }
+        let target_pos = scholar_chr_physics_position(chr);
+        let target_distance = distance_havok(player_pos, target_pos);
+        if target_distance > WYLDER_SKILL_LOCK_MAX_DISTANCE {
+            continue;
+        }
+        let Some(screen_pos) = scholar_target_screen_pos(chr) else {
+            continue;
+        };
+        if !wylder_skill_lock_screen_pos_in_reticle(screen_pos) {
+            continue;
+        }
+        if !scholar_has_line_of_sight(chr, player) {
+            continue;
+        }
+        let score = wylder_skill_lock_screen_pos_score(screen_pos).unwrap_or(f32::MAX);
+        if match best {
+            Some((_, best_score, _)) => score < best_score,
+            None => true,
+        } {
+            best = Some((screen_pos, score, target_distance));
+        }
+    }
+    best.map(|(pos, _, distance)| (pos, distance))
+}
+
+fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<([f32; 2], f32)> {
+    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+        return None;
+    };
+    let Ok(havok) = (unsafe { CSHavokMan::instance() }) else {
+        return None;
+    };
+    let cam = camera.pers_cam_1.as_ref();
+    let forward = cam.forward();
+    let len = (forward.0 * forward.0 + forward.1 * forward.1 + forward.2 * forward.2).sqrt();
+    if !len.is_finite() || len < 0.001 {
+        return None;
+    }
+
+    let physics = player.chr_ins.modules.as_ref().physics.as_ref();
+    let origin = HavokPosition(
+        physics.position.0,
+        physics.position.1 + (physics.hit_height * 0.62).clamp(0.8, 2.2),
+        physics.position.2,
+        0.0,
+    );
+    let distance = WYLDER_SKILL_LOCK_MAX_DISTANCE;
+    let delta = PositionDelta(
+        forward.0 / len * distance,
+        forward.1 / len * distance,
+        forward.2 / len * distance,
+    );
+    let mut best: Option<([f32; 2], f32)> = None;
+    for filter in WYLDER_SKILL_LOCK_WALL_FILTERS {
+        let Some(hit) = havok
+            .phys_world
+            .as_ref()
+            .cast_ray(filter, &origin, delta, player)
+        else {
+            continue;
+        };
+        let hit_distance = distance_havok(origin, hit);
+        let hit_screen_pos = project_lock_on_position(
+            fromsoftware_shared::F32Vector4(hit.0, hit.1, hit.2, 1.0),
+            cam,
+        );
+        if hit_distance.is_finite()
+            && hit_distance > WYLDER_SKILL_LOCK_MIN_WALL_HIT_DISTANCE
+            && hit_distance <= WYLDER_SKILL_LOCK_MAX_DISTANCE
+            && hit_screen_pos.is_some_and(wylder_skill_lock_screen_pos_in_reticle)
+        {
+            let screen_pos = hit_screen_pos.unwrap();
+            if match best {
+                Some((_, best_distance)) => hit_distance < best_distance,
+                None => true,
+            } {
+                best = Some((screen_pos, hit_distance));
+            }
+        }
+    }
+    best
+}
+
+fn wylder_skill_lock_distance_scale(distance: f32) -> f32 {
+    let t = ((distance - WYLDER_SKILL_LOCK_SCALE_NEAR_DISTANCE)
+        / (WYLDER_SKILL_LOCK_MAX_DISTANCE - WYLDER_SKILL_LOCK_SCALE_NEAR_DISTANCE))
+        .clamp(0.0, 1.0);
+    lerp(WYLDER_SKILL_LOCK_SCALE_NEAR, WYLDER_SKILL_LOCK_SCALE_FAR, t)
+}
+
+fn wylder_skill_lock_screen_pos_in_reticle(pos: [f32; 2]) -> bool {
+    wylder_skill_lock_screen_pos_score(pos).is_some_and(|score| {
+        let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+            return false;
+        };
+        let radius =
+            (window.screen_height as f32).min(window.screen_width as f32)
+                * WYLDER_SKILL_LOCK_SCREEN_RADIUS_FACTOR;
+        score <= radius * radius
+    })
+}
+
+fn wylder_skill_lock_screen_pos_score(pos: [f32; 2]) -> Option<f32> {
+    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+        return None;
+    };
+    let width = window.screen_width as f32;
+    let height = window.screen_height as f32;
+    if width <= 0.0 || height <= 0.0 || !pos[0].is_finite() || !pos[1].is_finite() {
+        return None;
+    }
+    let center = [width * 0.5, height * 0.5];
+    Some(screen_distance_sq(pos, center))
 }
 
 fn role_config(role: Role) -> &'static RoleConfig {
