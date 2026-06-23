@@ -20,6 +20,7 @@ struct HudSnapshot {
     recluse_lock_element: Option<RecluseElement>,
     recluse_lock_pos: Option<[f32; 2]>,
     recluse_lock_debug_points: LockDebugPoints,
+    recluse_blood_debug: RecluseBloodDebug,
     scholar_observing: bool,
     scholar_targets: [ScholarTargetSnapshot; SCHOLAR_SCAN_MAX_TARGETS],
     scholar_damage_numbers: [ScholarDamageNumberSnapshot; SCHOLAR_DAMAGE_NUMBER_MAX],
@@ -73,6 +74,9 @@ struct ChargeState {
     scholar_native_damage_ignores: HashMap<FieldInsHandle, (i32, Instant)>,
     scholar_enemy_effect_targets: Vec<FieldInsHandle>,
     duchess_snapshots: HashMap<usize, DuchessReplaySnapshot>,
+    recluse_blood_brands: HashMap<FieldInsHandle, RecluseBloodBrand>,
+    recluse_blood_pending_damage: Vec<RecluseBloodDamageEvent>,
+    recluse_blood_debug: RecluseBloodDebug,
     recluse_outputs_clear_at: Option<Instant>,
     wylder_skill_lock_active: bool,
     wylder_skill_lock_has_target: bool,
@@ -174,6 +178,9 @@ impl ChargeState {
             scholar_native_damage_ignores: HashMap::new(),
             scholar_enemy_effect_targets: Vec::new(),
             duchess_snapshots: HashMap::new(),
+            recluse_blood_brands: HashMap::new(),
+            recluse_blood_pending_damage: Vec::new(),
+            recluse_blood_debug: RecluseBloodDebug::default(),
             recluse_outputs_clear_at: None,
             wylder_skill_lock_active: false,
             wylder_skill_lock_has_target: false,
@@ -213,6 +220,8 @@ impl ChargeState {
         };
 
         let role = active_role_from_effects(&active_effects);
+        let damage_hook_events = drain_damage_hook_events();
+        self.update_recluse_blood_song(world_chr_man, now, &damage_hook_events);
         set_revenant_summon_range_hook_active(role == Some(Role::Revenant));
         if role != self.role {
             if let Some(old_role) = self.role {
@@ -269,7 +278,7 @@ impl ChargeState {
         self.update_scholar_targets(world_chr_man, role, &active_effects, delta);
         self.update_wylder_skill_lock(world_chr_man, role, &active_effects);
         self.update_scholar_sympathy(world_chr_man, role, &active_effects, locked_on_enemy, now);
-        self.update_ironeye_weakness(world_chr_man, role, now);
+        self.update_ironeye_weakness(world_chr_man, role, now, &damage_hook_events);
         self.update_duchess_replay_history(world_chr_man, role);
         if role == Role::Revenant {
             patch_revenant_buddy_stones_once();
@@ -356,6 +365,10 @@ impl ChargeState {
         self.revenant_converted_souls.clear();
         self.revenant_debug_souls.clear();
         self.revenant_seen_deaths.clear();
+    }
+
+    fn recluse_blood_debug(&self) -> RecluseBloodDebug {
+        self.recluse_blood_debug
     }
 
     fn update_revenant_summons(
@@ -1037,12 +1050,17 @@ impl ChargeState {
         self.wylder_skill_lock_has_target = self.wylder_skill_lock_pos.is_some();
     }
 
-    fn update_ironeye_weakness(&mut self, world_chr_man: &mut WorldChrMan, role: Role, now: Instant) {
+    fn update_ironeye_weakness(
+        &mut self,
+        world_chr_man: &mut WorldChrMan,
+        role: Role,
+        now: Instant,
+        damage_events: &[DamageHookEvent],
+    ) {
         let config = role_config(Role::Ironeye);
         if role != Role::Ironeye {
             self.clear_ironeye_weakness_marks(world_chr_man, config);
             self.ironeye_weakness_bursts.clear();
-            drain_damage_hook_events();
             return;
         }
 
@@ -1050,7 +1068,7 @@ impl ChargeState {
             .retain(|burst| (now - burst.created_at).as_secs_f32() < IRONEYE_WEAKNESS_BURST_SECONDS);
         self.expire_ironeye_weakness_marks(world_chr_man, config, now);
         self.refresh_ironeye_weakness_marks(world_chr_man, config, now);
-        self.accumulate_ironeye_weakness_damage(world_chr_man, config, now);
+        self.accumulate_ironeye_weakness_damage(world_chr_man, config, now, damage_events);
     }
 
     fn refresh_ironeye_weakness_marks(
@@ -1107,14 +1125,14 @@ impl ChargeState {
         world_chr_man: &mut WorldChrMan,
         config: &RoleConfig,
         now: Instant,
+        events: &[DamageHookEvent],
     ) {
-        let events = drain_damage_hook_events();
         if events.is_empty() || self.ironeye_weakness_marks.is_empty() {
             return;
         }
 
         let mut broken = Vec::new();
-        for event in events {
+        for event in events.iter().copied() {
             for (handle, mark) in self.ironeye_weakness_marks.iter_mut() {
                 if event.target_damage_module != mark.damage_module
                     || event.created_at < mark.started_at
@@ -1197,6 +1215,156 @@ impl ChargeState {
                 enemy.remove_speffect(config.effect(SP_IRONEYE_WEAKNESS_ACTIVE));
             }
         }
+    }
+
+    fn update_recluse_blood_song(
+        &mut self,
+        world_chr_man: &mut WorldChrMan,
+        now: Instant,
+        damage_events: &[DamageHookEvent],
+    ) {
+        self.refresh_recluse_blood_brands(world_chr_man);
+        self.recluse_blood_debug.branded = self.recluse_blood_brands.len();
+        self.recluse_blood_debug.hook_events = damage_events.len();
+        self.queue_recluse_blood_damage_events(damage_events);
+        self.apply_recluse_blood_song_rewards(world_chr_man, now);
+    }
+
+    fn queue_recluse_blood_damage_events(&mut self, damage_events: &[DamageHookEvent]) {
+        self.recluse_blood_debug.queued = 0;
+        if damage_events.is_empty() || self.recluse_blood_brands.is_empty() {
+            self.recluse_blood_debug.pending = self.recluse_blood_pending_damage.len();
+            return;
+        }
+        for event in damage_events.iter().copied() {
+            if event.damage <= 0 {
+                continue;
+            }
+            if self
+                .recluse_blood_brands
+                .values()
+                .any(|brand| brand.damage_module == event.target_damage_module)
+            {
+                self.recluse_blood_pending_damage
+                    .push(RecluseBloodDamageEvent {
+                        target_damage_module: event.target_damage_module,
+                        damage: event.damage,
+                        created_at: event.created_at,
+                    });
+                self.recluse_blood_debug.queued += 1;
+            }
+        }
+        self.recluse_blood_debug.pending = self.recluse_blood_pending_damage.len();
+    }
+
+    fn apply_recluse_blood_song_rewards(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
+        self.recluse_blood_debug.resolved = 0;
+        self.recluse_blood_debug.expired = 0;
+        if self.recluse_blood_pending_damage.is_empty() {
+            return;
+        }
+        let Some((player_handle, player_team_type)) =
+            world_chr_man.main_player.as_ref().map(|player| {
+                (
+                    player.chr_ins.field_ins_handle,
+                    player.chr_ins.team_type,
+                )
+            })
+        else {
+            return;
+        };
+
+        let mut restores: HashMap<FieldInsHandle, (i32, i32)> = HashMap::new();
+        let pending_events = std::mem::take(&mut self.recluse_blood_pending_damage);
+        let mut retained = Vec::new();
+        for event in pending_events {
+            let age = (now - event.created_at).as_secs_f32();
+            if age < RECLUSE_BLOOD_SOUL_DAMAGE_RESOLVE_DELAY {
+                retained.push(event);
+                continue;
+            }
+            if age > RECLUSE_BLOOD_SOUL_DAMAGE_EVENT_TTL {
+                self.recluse_blood_debug.expired += 1;
+                continue;
+            }
+            let Some(handle) = self
+                .recluse_blood_brands
+                .iter()
+                .find(|(_, brand)| brand.damage_module == event.target_damage_module)
+                .map(|(handle, _)| *handle)
+            else {
+                continue;
+            };
+            let Some(enemy) = world_chr_man.chr_ins_by_handle(&handle) else {
+                self.recluse_blood_debug.expired += 1;
+                continue;
+            };
+            let raw_attacker = enemy.last_hit_by;
+            let attacker = if raw_attacker.is_empty() {
+                player_handle
+            } else {
+                raw_attacker
+            };
+            let attacker_friendly = recluse_blood_attacker_is_friendly(
+                world_chr_man,
+                attacker,
+                player_handle,
+                player_team_type,
+            );
+            self.recluse_blood_debug.last_attacker_container = attacker.selector.container();
+            self.recluse_blood_debug.last_attacker_index = attacker.selector.index();
+            self.recluse_blood_debug.last_attacker_friendly = attacker_friendly;
+            if !attacker_friendly {
+                retained.push(event);
+                continue;
+            }
+            let damage = event.damage.max(0);
+            if damage <= 0 {
+                continue;
+            }
+            let hp_restore = scale_i32(damage, RECLUSE_BLOOD_SOUL_HP_RESTORE_RATE);
+            let fp_restore = scale_i32(damage, RECLUSE_BLOOD_SOUL_FP_RESTORE_RATE);
+            self.recluse_blood_debug.last_damage = damage;
+            self.recluse_blood_debug.last_hp_restore = hp_restore;
+            self.recluse_blood_debug.last_fp_restore = fp_restore;
+            self.recluse_blood_debug.resolved += 1;
+            let entry = restores.entry(attacker).or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(hp_restore);
+            entry.1 = entry.1.saturating_add(fp_restore);
+        }
+        self.recluse_blood_pending_damage = retained;
+        self.recluse_blood_debug.pending = self.recluse_blood_pending_damage.len();
+
+        for (attacker, (hp_restore, fp_restore)) in restores {
+            if hp_restore > 0 {
+                apply_hp_delta_by_handle(world_chr_man, attacker, hp_restore);
+            }
+            if fp_restore > 0 {
+                apply_fp_delta_by_handle(world_chr_man, attacker, fp_restore);
+            }
+        }
+    }
+
+    fn refresh_recluse_blood_brands(&mut self, world_chr_man: &WorldChrMan) {
+        let brand_sp_effect = role_config(Role::Recluse).effect(SP_RECLUSE_BLOOD_SOUL_BRAND);
+        let mut seen = Vec::new();
+        for entry in world_chr_man.chr_inses_by_distance.iter() {
+            let enemy = unsafe { entry.chr_ins.as_ref() };
+            if scholar_reject_reason(enemy).is_some() || !chr_has_speffect(enemy, brand_sp_effect)
+            {
+                continue;
+            }
+            let damage_module = damage_module_from_chr_ins(enemy);
+            if damage_module == 0 {
+                continue;
+            }
+            let handle = enemy.field_ins_handle;
+            self.recluse_blood_brands
+                .insert(handle, RecluseBloodBrand { damage_module });
+            seen.push(handle);
+        }
+        self.recluse_blood_brands
+            .retain(|handle, _| seen.contains(handle));
     }
 
     fn update_duchess_replay_history(&mut self, world_chr_man: &WorldChrMan, role: Role) {
@@ -2120,6 +2288,7 @@ impl ChargeState {
             } else {
                 [None; 5]
             },
+            recluse_blood_debug: self.recluse_blood_debug,
             scholar_observing: config.role == Role::Scholar && self.scholar_observing,
             scholar_targets,
             scholar_damage_numbers,
@@ -3424,6 +3593,10 @@ fn apply_hp_delta_by_handle(
     world_chr_man
         .chr_ins_by_handle_mut(&handle)
         .map(|chr| apply_chr_hp_delta(chr, delta))
+        .or_else(|| {
+            revenant_buddy_chr_by_handle_mut(world_chr_man, handle)
+                .map(|chr| apply_chr_hp_delta(chr, delta))
+        })
         .unwrap_or(0)
 }
 
@@ -3434,6 +3607,70 @@ fn apply_chr_hp_delta(chr: &mut ChrIns, delta: i32) -> i32 {
     let new_hp = old_hp.saturating_add(delta).clamp(0, max_hp);
     data.hp = new_hp;
     new_hp - old_hp
+}
+
+fn apply_fp_delta_by_handle(
+    world_chr_man: &mut WorldChrMan,
+    handle: FieldInsHandle,
+    delta: i32,
+) -> i32 {
+    if delta == 0 {
+        return 0;
+    }
+    if let Some(player) = world_chr_man.main_player.as_mut() {
+        if player.chr_ins.field_ins_handle == handle {
+            return apply_chr_fp_delta(&mut player.chr_ins, delta);
+        }
+    }
+    world_chr_man
+        .chr_ins_by_handle_mut(&handle)
+        .map(|chr| apply_chr_fp_delta(chr, delta))
+        .or_else(|| {
+            revenant_buddy_chr_by_handle_mut(world_chr_man, handle)
+                .map(|chr| apply_chr_fp_delta(chr, delta))
+        })
+        .unwrap_or(0)
+}
+
+fn apply_chr_fp_delta(chr: &mut ChrIns, delta: i32) -> i32 {
+    let data = chr.modules.as_mut().data.as_mut();
+    let old_fp = data.fp;
+    let max_fp = data.max_fp.max(1);
+    let new_fp = old_fp.saturating_add(delta).clamp(0, max_fp);
+    data.fp = new_fp;
+    new_fp - old_fp
+}
+
+fn recluse_blood_attacker_is_friendly(
+    world_chr_man: &WorldChrMan,
+    attacker: FieldInsHandle,
+    player_handle: FieldInsHandle,
+    player_team_type: u8,
+) -> bool {
+    if attacker.is_empty() {
+        return false;
+    }
+    if attacker == player_handle {
+        return true;
+    }
+    if let Some(chr) = world_chr_man.chr_ins_by_handle(&attacker) {
+        return recluse_blood_chr_is_friendly(chr, player_team_type);
+    }
+    revenant_buddy_chr_by_handle(world_chr_man, attacker)
+        .is_some_and(|chr| recluse_blood_chr_is_friendly(chr, player_team_type))
+}
+
+fn recluse_blood_chr_is_friendly(chr: &ChrIns, player_team_type: u8) -> bool {
+    if player_team_type != 0 && chr.team_type == player_team_type {
+        return true;
+    }
+    if chr.team_type == REVENANT_CONVERTED_SOUL_TEAM_TYPE {
+        return true;
+    }
+    matches!(
+        chr.chr_type,
+        ChrType::Local | ChrType::WhitePhantom | ChrType::WhiteSummonNpc | ChrType::BluePhantom
+    )
 }
 
 fn advance_layered_charge(layers: &mut [f32; 2], max_layers: usize, mut charge: f32) {

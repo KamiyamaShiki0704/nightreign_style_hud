@@ -196,6 +196,33 @@ fn draw_recluse_lock_debug_points(ui: &Ui, points: LockDebugPoints) {
     }
 }
 
+fn draw_recluse_blood_debug(debug: RecluseBloodDebug, scale: f32) {
+    if !RECLUSE_BLOOD_DEBUG_VISIBLE {
+        return;
+    }
+    let line = format!(
+        "Recluse blood brand:{} hook:{} queued:{} pending:{} ok:{} expired:{} dmg:{} atk:{}:{} friendly:{} hp/fp:{}/{}",
+        debug.branded,
+        debug.hook_events,
+        debug.queued,
+        debug.pending,
+        debug.resolved,
+        debug.expired,
+        debug.last_damage,
+        debug.last_attacker_container,
+        debug.last_attacker_index,
+        debug.last_attacker_friendly as u8,
+        debug.last_hp_restore,
+        debug.last_fp_restore,
+    );
+    draw_sized_text(
+        [24.0 * scale, 104.0 * scale],
+        16.0 * scale,
+        ImColor32::from_rgba(220, 235, 255, 235),
+        &line,
+    );
+}
+
 fn draw_revenant_static_summon_ui(
     ui: &Ui,
     skill_center: [f32; 2],

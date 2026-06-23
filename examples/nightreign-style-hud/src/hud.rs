@@ -83,6 +83,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
         update_multi_lock_live_bullets();
         let _ = multi_lock_snapshot_targets();
         let Some(snapshot) = self.charges.sync(now) else {
+            draw_recluse_blood_debug(self.charges.recluse_blood_debug(), self.scale);
             return;
         };
         let role = snapshot.role;
@@ -180,6 +181,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
         if role == Role::Scholar {
             draw_scholar_damage_numbers(ui, &snapshot);
         }
+        draw_recluse_blood_debug(snapshot.recluse_blood_debug, self.scale);
         draw_charge_slot(
             ui,
             ultimate_center,

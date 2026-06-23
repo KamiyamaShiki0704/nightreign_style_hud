@@ -112,6 +112,34 @@ struct IroneyeWeaknessBurst {
     created_at: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct RecluseBloodBrand {
+    damage_module: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RecluseBloodDamageEvent {
+    target_damage_module: usize,
+    damage: i32,
+    created_at: Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RecluseBloodDebug {
+    branded: usize,
+    hook_events: usize,
+    queued: usize,
+    pending: usize,
+    resolved: usize,
+    expired: usize,
+    last_damage: i32,
+    last_attacker_container: u32,
+    last_attacker_index: u32,
+    last_attacker_friendly: bool,
+    last_hp_restore: i32,
+    last_fp_restore: i32,
+}
+
 #[derive(Clone, Copy, Default)]
 struct ScholarTargetState {
     progress: f32,
@@ -352,6 +380,7 @@ const SP_RECLUSE_ABSORB_MAGIC: i32 = 51;
 const SP_RECLUSE_ABSORB_FIRE: i32 = 52;
 const SP_RECLUSE_ABSORB_LIGHTNING: i32 = 53;
 const SP_RECLUSE_ABSORB_HOLY: i32 = 54;
+const SP_RECLUSE_BLOOD_SOUL_BRAND: i32 = 65;
 const SP_SCHOLAR_OBSERVE: i32 = 30;
 const SP_SCHOLAR_APPLY_SELF: i32 = 31;
 const SP_SCHOLAR_APPLY_ENEMY: i32 = 32;
@@ -373,6 +402,11 @@ const DUCHESS_REPLAY_RATE: f32 = 0.50;
 const SP_DUCHESS_REPLAY_DAMAGE: i32 = 880365;
 // TODO: Duchess replay visual needs a real ReplayGhost/ghost_chr_set path, not HUD afterimages or SpEffect tinting.
 const RECLUSE_TRANSIENT_OUTPUT_SECONDS: f32 = 0.35;
+const RECLUSE_BLOOD_SOUL_HP_RESTORE_RATE: f32 = 0.40;
+const RECLUSE_BLOOD_SOUL_FP_RESTORE_RATE: f32 = 0.10;
+const RECLUSE_BLOOD_SOUL_DAMAGE_RESOLVE_DELAY: f32 = 0.06;
+const RECLUSE_BLOOD_SOUL_DAMAGE_EVENT_TTL: f32 = 0.75;
+const RECLUSE_BLOOD_DEBUG_VISIBLE: bool = false;
 const REVENANT_SUMMON_COUNT: usize = 3;
 const REVENANT_SUMMON_EFFECTS: [i32; REVENANT_SUMMON_COUNT] = [270000, 271000, 272000];
 const REVENANT_BUDDY_PARAM_IDS: [u32; REVENANT_SUMMON_COUNT] = [27000000, 27100000, 27200000];

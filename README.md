@@ -207,6 +207,16 @@ runtime writes `880005` for ultimate readiness.
   - `880653` = absorbed lightning.
   - `880654` = absorbed holy.
   - `880631..880644` = mixed magic result slots 1..14.
+- Ultimate "Blood Soul Song":
+  - Parameter-side bullet/attack logic applies the blood brand Speffect
+    `880665` to affected enemies.
+  - The DLL detects valid enemies while `880665` is present; duration is
+    controlled parameter-side.
+  - Configure the small magic damage parameter-side.
+  - Configure `880665` parameter-side for the intended about `1.15x` damage
+    taken multiplier.
+  - When a friendly attacker hits a branded target, that attacker restores HP
+    equal to 40% of the damage and FP equal to 10% of the damage.
 - Stored element UI is drawn by the DLL.
 - Locked target elemental trace is cleared when absorbed.
 
