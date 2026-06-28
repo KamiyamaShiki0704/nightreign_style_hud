@@ -178,6 +178,19 @@ runtime writes `880005` for ultimate readiness.
   next one.
 - Family HP is remembered across recall/resummon.
 - Recalled family members regenerate 2% HP per second.
+- Skill move / family selection HUD:
+  - `880554` on the player switches Revenant into the upper-left family
+    selection HUD.
+  - While active, the bottom family HP rows are hidden and the ultimate HUD is
+    dimmed.
+  - The upper-left HUD shows the three family portraits, summon key labels,
+    family names, and remembered HP bars.
+- Family death lock markers:
+  - `880551` = family slot 1 died and has not recovered to 50% HP.
+  - `880552` = family slot 2 died and has not recovered to 50% HP.
+  - `880553` = family slot 3 died and has not recovered to 50% HP.
+  - The DLL applies the marker once when the remembered HP reaches 0, then
+    removes it after that family regenerates to at least 50% HP.
 - Summon range is patched for Revenant so Buddy summon range is effectively
   expanded to 1000.
 - Passive conversion:
@@ -217,6 +230,9 @@ runtime writes `880005` for ultimate readiness.
     taken multiplier.
   - When a friendly attacker hits a branded target, that attacker restores HP
     equal to 40% of the damage and FP equal to 10% of the damage.
+  - Optional light brand `883000`: when the local player hits a target with
+    this Speffect, the player restores fixed FP equal to 0.1% of max FP per
+    hit. This variant does not restore HP.
 - Stored element UI is drawn by the DLL.
 - Locked target elemental trace is cleared when absorbed.
 

@@ -115,6 +115,7 @@ struct IroneyeWeaknessBurst {
 #[derive(Clone, Copy)]
 struct RecluseBloodBrand {
     damage_module: usize,
+    kind: RecluseBloodBrandKind,
 }
 
 #[derive(Clone, Copy)]
@@ -122,6 +123,13 @@ struct RecluseBloodDamageEvent {
     target_damage_module: usize,
     damage: i32,
     created_at: Instant,
+    brand_kind: RecluseBloodBrandKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecluseBloodBrandKind {
+    Normal,
+    FixedFpOnly,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -325,6 +333,7 @@ const IRONEYE_WEAKNESS_BURST_SECONDS: f32 =
         + IRONEYE_WEAKNESS_BURST_HOLD_SECONDS
         + IRONEYE_WEAKNESS_BURST_FADE_SECONDS;
 const IRONEYE_RETICLE_HALF_SIZE: f32 = 46.0;
+const SP_STANDALONE_PRECISION_AIM: i32 = 883100;
 const SCHOLAR_SCAN_MAX_DISTANCE: f32 = 58.0;
 const SCHOLAR_SCAN_DISTANCE_EXPONENT: f32 = 1.65;
 const SCHOLAR_LOCK_TARGET_FALLBACK_RADIUS: f32 = 38.0;
@@ -404,13 +413,18 @@ const SP_DUCHESS_REPLAY_DAMAGE: i32 = 880365;
 const RECLUSE_TRANSIENT_OUTPUT_SECONDS: f32 = 0.35;
 const RECLUSE_BLOOD_SOUL_HP_RESTORE_RATE: f32 = 0.40;
 const RECLUSE_BLOOD_SOUL_FP_RESTORE_RATE: f32 = 0.10;
+const SP_RECLUSE_BLOOD_SOUL_FIXED_FP_BRAND: i32 = 883000;
+const RECLUSE_BLOOD_SOUL_FIXED_FP_RESTORE_RATE: f32 = 0.001;
 const RECLUSE_BLOOD_SOUL_DAMAGE_RESOLVE_DELAY: f32 = 0.06;
 const RECLUSE_BLOOD_SOUL_DAMAGE_EVENT_TTL: f32 = 0.75;
 const RECLUSE_BLOOD_DEBUG_VISIBLE: bool = false;
 const REVENANT_SUMMON_COUNT: usize = 3;
 const REVENANT_SUMMON_EFFECTS: [i32; REVENANT_SUMMON_COUNT] = [270000, 271000, 272000];
+const REVENANT_SUMMON_DEATH_EFFECTS: [i32; REVENANT_SUMMON_COUNT] = [880551, 880552, 880553];
+const SP_REVENANT_SKILL_MOVE_HUD: i32 = 880554;
 const REVENANT_BUDDY_PARAM_IDS: [u32; REVENANT_SUMMON_COUNT] = [27000000, 27100000, 27200000];
 const REVENANT_FAMILY_REGEN_PER_SECOND: f32 = 0.02;
+const REVENANT_SUMMON_REVIVE_READY_HP_RATIO: f32 = 0.50;
 const REVENANT_SUMMON_HP_RESTORE_SECONDS: f32 = 0.8;
 
 const UNDERTAKER_BUFF_SECONDS: f32 = 8.0;

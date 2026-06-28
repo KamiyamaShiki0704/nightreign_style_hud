@@ -13,15 +13,16 @@ fn draw_charge_slot(
     active_textures: [Option<TextureRegion>; 3],
     suppress_ready_effect: bool,
     active_style: ActiveTextureStyle,
+    solid: bool,
     now: Instant,
     animation_start: Instant,
 ) {
-    let shadow = ImColor32::from_rgba(0, 0, 0, 95);
-    let plate = ImColor32::from_rgba(18, 24, 36, 170);
+    let shadow = ImColor32::from_rgba(0, 0, 0, hud_alpha(95, solid));
+    let plate = ImColor32::from_rgba(18, 24, 36, hud_alpha(170, solid));
     let border = if ready {
-        ImColor32::from_rgba(208, 225, 255, 210)
+        ImColor32::from_rgba(208, 225, 255, hud_alpha(210, solid))
     } else {
-        ImColor32::from_rgba(184, 194, 215, 155)
+        ImColor32::from_rgba(184, 194, 215, hud_alpha(155, solid))
     };
 
     {
@@ -36,22 +37,38 @@ fn draw_charge_slot(
             .build();
     }
 
-    draw_png_icon(ui, center, radius, icon_texture, icon_texture_scale, ready);
+    draw_png_icon(
+        ui,
+        center,
+        radius,
+        icon_texture,
+        icon_texture_scale,
+        ready,
+        solid,
+    );
     if top_down_fill {
-        draw_bottom_fill(ui, center, radius - 3.0, layers[0], slot.fill);
+        draw_bottom_fill(ui, center, radius - 3.0, layers[0], charge_fill_color(solid));
     } else if !ready {
-        draw_bottom_fill(ui, center, radius - 3.0, layers[0], slot.fill);
+        draw_bottom_fill(ui, center, radius - 3.0, layers[0], charge_fill_color(solid));
     } else if count.is_some() && layers[1] > 0.0 && layers[1] < 1.0 {
         draw_bottom_fill(
             ui,
             center,
             radius - 8.0 * self_scale(radius),
             layers[1],
-            ImColor32::from_rgba(145, 196, 255, 112),
+            ImColor32::from_rgba(145, 196, 255, hud_alpha(112, solid)),
         );
     }
     if icon_texture.is_none() {
-        draw_icon_mark(ui, center, radius, slot.label, slot.accent, slot.icon_scale);
+        draw_icon_mark(
+            ui,
+            center,
+            radius,
+            slot.label,
+            slot.accent,
+            slot.icon_scale,
+            solid,
+        );
     }
 
     {
@@ -86,7 +103,7 @@ fn draw_charge_slot(
     }
 
     if let Some(count) = count {
-        draw_charge_count(ui, center, radius, count);
+        draw_charge_count(ui, center, radius, count, solid);
     }
 }
 
@@ -194,6 +211,18 @@ fn draw_recluse_lock_debug_points(ui: &Ui, points: LockDebugPoints) {
             labels[index],
         );
     }
+}
+
+fn hud_alpha(alpha: u8, solid: bool) -> u8 {
+    if solid {
+        alpha
+    } else {
+        ((alpha as f32) * 0.62).round().clamp(0.0, 255.0) as u8
+    }
+}
+
+fn charge_fill_color(solid: bool) -> ImColor32 {
+    ImColor32::from_rgba(80, 154, 255, hud_alpha(122, solid))
 }
 
 fn draw_recluse_blood_debug(debug: RecluseBloodDebug, scale: f32) {
@@ -365,6 +394,165 @@ fn draw_revenant_static_summon_ui(
     }
 }
 
+fn draw_revenant_skill_move_summon_ui(
+    ui: &Ui,
+    viewport: [f32; 2],
+    snapshot: &HudSnapshot,
+    icons: &RevenantIconSet,
+    scale: f32,
+) {
+    let draw = ui.get_foreground_draw_list();
+    let ui_scale = scale * 1.2;
+    let row_h = 76.0 * ui_scale;
+    let row_step = 62.0 * ui_scale;
+    let icon_size = 68.0 * ui_scale;
+    let key_size = 30.0 * ui_scale;
+    let bar_w = 162.0 * ui_scale;
+    let bar_h = 8.5 * ui_scale;
+    let base_x = snap_px(48.0 * scale);
+    let base_y = snap_px(
+        (viewport[1] * 0.58 - 112.0 * ui_scale).clamp(132.0 * scale, viewport[1] - 310.0 * scale),
+    );
+
+    for index in 0..REVENANT_SUMMON_COUNT {
+        let summon = snapshot.revenant_summons[index];
+        let y = snap_px(base_y + index as f32 * row_step);
+        let row_min = [base_x, y];
+        let row_max = [snap_px(base_x + 252.0 * ui_scale), snap_px(y + row_h)];
+        let active_strength = if summon.active { 1.0 } else { 0.72 };
+
+        if let Some(texture_id) = icons.summon_atlas {
+            draw.add_image(texture_id, row_min, row_max)
+                .uv_min(REVENANT_SUMMON_FRAME_UV_MIN)
+                .uv_max(REVENANT_SUMMON_FRAME_UV_MAX)
+                .col(if summon.active {
+                    ImColor32::from_rgba(255, 255, 255, 230)
+                } else {
+                    ImColor32::from_rgba(255, 255, 255, 178)
+                })
+                .build();
+        } else {
+            draw.add_rect(row_min, row_max, ImColor32::from_rgba(168, 190, 235, 140))
+                .thickness(1.0 * scale)
+                .build();
+        }
+
+        let icon_min = [snap_px(base_x + 5.0 * ui_scale), snap_px(y + 4.0 * ui_scale)];
+        let icon_max = [icon_min[0] + icon_size, icon_min[1] + icon_size];
+        if let Some(texture_id) = icons.summon_atlas {
+            let uv_min_x = 0.25 * (index as f32 + 1.0);
+            let uv_max_x = uv_min_x + 0.25;
+            draw.add_image(texture_id, icon_min, icon_max)
+                .uv_min([uv_min_x, 0.0])
+                .uv_max([uv_max_x, REVENANT_SUMMON_TOP_UV_MAX_Y])
+                .col(ImColor32::from_rgba(
+                    (255.0 * active_strength) as u8,
+                    (255.0 * active_strength) as u8,
+                    (255.0 * active_strength) as u8,
+                    if summon.active { 245 } else { 185 },
+                ))
+                .build();
+        } else {
+            let center = [
+                icon_min[0] + icon_size * 0.5,
+                icon_min[1] + icon_size * 0.5,
+            ];
+            draw.add_circle(center, icon_size * 0.38, ImColor32::from_rgba(130, 145, 185, 135))
+                .num_segments(28)
+                .filled(true)
+                .build();
+        }
+
+        let key_min = [
+            snap_px(base_x + 70.0 * ui_scale),
+            snap_px(y + 17.0 * ui_scale),
+        ];
+        let key_max = [key_min[0] + key_size, key_min[1] + key_size];
+        if let Some(texture_id) = icons.controller_buttons {
+            let (uv_min, uv_max) = REVENANT_SUMMON_PAD_BUTTON_UVS[index];
+            draw.add_image(texture_id, key_min, key_max)
+                .uv_min(uv_min)
+                .uv_max(uv_max)
+                .col(ImColor32::from_rgba(255, 255, 255, if summon.active { 245 } else { 185 }))
+                .build();
+        } else {
+            draw.add_rect(key_min, key_max, ImColor32::from_rgba(12, 17, 28, 178))
+                .filled(true)
+                .build();
+            draw.add_rect(
+                key_min,
+                key_max,
+                ImColor32::from_rgba(212, 226, 255, if summon.active { 218 } else { 150 }),
+            )
+            .thickness(1.0 * scale)
+            .build();
+            draw_sized_text(
+                [key_min[0] + 5.5 * ui_scale, key_min[1] + 1.0 * ui_scale],
+                18.0 * ui_scale,
+                ImColor32::from_rgba(232, 238, 255, if summon.active { 245 } else { 185 }),
+                REVENANT_SUMMON_KEY_LABELS[index],
+            );
+        }
+
+        draw_sized_text(
+            [snap_px(base_x + 100.0 * ui_scale), snap_px(y + 19.0 * ui_scale)],
+            19.0 * ui_scale,
+            ImColor32::from_rgba(230, 236, 252, if summon.active { 245 } else { 190 }),
+            REVENANT_SUMMON_NAMES[index],
+        );
+
+        let hp_ratio = summon.hp_ratio.clamp(0.0, 1.0);
+        let bar_x = snap_px(base_x + 74.0 * ui_scale);
+        let bar_y = snap_px(y + 49.0 * ui_scale);
+        draw.add_rect(
+            [bar_x, bar_y],
+            [bar_x + bar_w, bar_y + bar_h],
+            ImColor32::from_rgba(14, 12, 20, 148),
+        )
+        .filled(true)
+        .build();
+        if let Some(texture_id) = icons.summon_atlas {
+            if hp_ratio > 0.0 {
+                let hp_uv_max = [
+                    REVENANT_SUMMON_HP_UV_MIN[0]
+                        + (REVENANT_SUMMON_HP_UV_MAX[0] - REVENANT_SUMMON_HP_UV_MIN[0])
+                            * hp_ratio,
+                    REVENANT_SUMMON_HP_UV_MAX[1],
+                ];
+                draw.add_image(
+                    texture_id,
+                    [bar_x, bar_y],
+                    [snap_px(bar_x + bar_w * hp_ratio), snap_px(bar_y + bar_h)],
+                )
+                .uv_min(REVENANT_SUMMON_HP_UV_MIN)
+                .uv_max(hp_uv_max)
+                .col(ImColor32::from_rgba(255, 255, 255, if summon.active { 242 } else { 205 }))
+                .build();
+            }
+        } else {
+            draw.add_rect(
+                [bar_x, bar_y],
+                [bar_x + bar_w * hp_ratio, bar_y + bar_h],
+                ImColor32::from_rgba(188, 160, 226, 220),
+            )
+            .filled(true)
+            .build();
+        }
+    }
+}
+
+fn draw_charge_slot_dim_overlay(ui: &Ui, center: [f32; 2], radius: f32, scale: f32) {
+    let draw = ui.get_foreground_draw_list();
+    draw.add_circle(center, radius + 8.0 * scale, ImColor32::from_rgba(0, 0, 0, 138))
+        .num_segments(96)
+        .filled(true)
+        .build();
+    draw.add_circle(center, radius + 1.0 * scale, ImColor32::from_rgba(58, 68, 92, 78))
+        .num_segments(96)
+        .thickness(1.5 * scale)
+        .build();
+}
+
 fn draw_revenant_game_settings_debug(x: f32, y: f32, font_size: f32) {
     let Some(lines) = revenant_game_settings_debug_lines() else {
         return;
@@ -510,7 +698,45 @@ fn draw_ironeye_precision_reticle(
     if !snapshot.ironeye_precision_aiming {
         return;
     }
+    draw_ironeye_precision_reticle_active(ui, icons, scale);
+}
 
+fn draw_standalone_precision_reticle(
+    ui: &Ui,
+    snapshot: &HudSnapshot,
+    icons: &PrecisionReticleIconSet,
+    scale: f32,
+) {
+    if !snapshot.standalone_precision_aiming {
+        return;
+    }
+    draw_standalone_precision_reticle_active(ui, icons, scale);
+}
+
+fn draw_standalone_precision_reticle_active(
+    ui: &Ui,
+    icons: &PrecisionReticleIconSet,
+    scale: f32,
+) {
+    let viewport = ui.io().display_size;
+    let center = ironeye_precision_reticle_screen_pos(viewport);
+    let mut drew_reticle = false;
+    for texture_id in icons.textures.into_iter().flatten() {
+        draw_centered_texture(
+            ui,
+            center,
+            IRONEYE_RETICLE_HALF_SIZE * scale,
+            texture_id,
+            ImColor32::from_rgba(255, 255, 255, 235),
+        );
+        drew_reticle = true;
+    }
+    if !drew_reticle {
+        draw_ironeye_precision_reticle_fallback(ui, center, scale);
+    }
+}
+
+fn draw_ironeye_precision_reticle_active(ui: &Ui, icons: &IroneyeIconSet, scale: f32) {
     let viewport = ui.io().display_size;
     let center = ironeye_precision_reticle_screen_pos(viewport);
     let mut drew_reticle = false;
@@ -530,20 +756,24 @@ fn draw_ironeye_precision_reticle(
         }
     }
     if !drew_reticle {
-        let draw = ui.get_foreground_draw_list();
-        let half = IRONEYE_RETICLE_HALF_SIZE * 0.42 * scale;
-        let color = ImColor32::from_rgba(244, 247, 255, 220);
-        draw.add_line([center[0] - half, center[1]], [center[0] + half, center[1]], color)
-            .thickness(1.5 * scale)
-            .build();
-        draw.add_line([center[0], center[1] - half], [center[0], center[1] + half], color)
-            .thickness(1.5 * scale)
-            .build();
-        draw.add_circle(center, half * 0.36, color)
-            .num_segments(48)
-            .thickness(1.4 * scale)
-            .build();
+        draw_ironeye_precision_reticle_fallback(ui, center, scale);
     }
+}
+
+fn draw_ironeye_precision_reticle_fallback(ui: &Ui, center: [f32; 2], scale: f32) {
+    let draw = ui.get_foreground_draw_list();
+    let half = IRONEYE_RETICLE_HALF_SIZE * 0.42 * scale;
+    let color = ImColor32::from_rgba(244, 247, 255, 220);
+    draw.add_line([center[0] - half, center[1]], [center[0] + half, center[1]], color)
+        .thickness(1.5 * scale)
+        .build();
+    draw.add_line([center[0], center[1] - half], [center[0], center[1] + half], color)
+        .thickness(1.5 * scale)
+        .build();
+    draw.add_circle(center, half * 0.36, color)
+        .num_segments(48)
+        .thickness(1.4 * scale)
+        .build();
 }
 
 fn draw_wylder_skill_lock_ui(
@@ -1249,11 +1479,32 @@ const REVENANT_SUMMON_FRAME_UV_MIN: [f32; 2] = [0.5 / 1024.0, 0.5 / 512.0];
 const REVENANT_SUMMON_FRAME_UV_MAX: [f32; 2] = [255.5 / 1024.0, 255.5 / 512.0];
 const REVENANT_SUMMON_HP_UV_MIN: [f32; 2] = [0.0, 0.5];
 const REVENANT_SUMMON_HP_UV_MAX: [f32; 2] = [408.0 / 1024.0, 280.0 / 512.0];
+const REVENANT_SUMMON_KEY_LABELS: [&str; REVENANT_SUMMON_COUNT] = ["Q", "T", "E"];
+const REVENANT_SUMMON_NAMES: [&str; REVENANT_SUMMON_COUNT] = ["Helen", "Frederick", "Sebastian"];
+const REVENANT_SUMMON_PAD_BUTTON_UVS: [([f32; 2], [f32; 2]); REVENANT_SUMMON_COUNT] = [
+    atlas_uv_rect(70.0, 292.0, 66.0, 66.0, 512.0, 512.0), // KG_R1
+    atlas_uv_rect(140.0, 350.0, 66.0, 66.0, 512.0, 512.0), // KG_R2
+    atlas_uv_rect(436.0, 0.0, 66.0, 66.0, 512.0, 512.0),  // KG_L1
+];
 const REVENANT_SUMMON_DEBUG_VISIBLE: bool = false;
 const REVENANT_GAME_SETTINGS_DEBUG_VISIBLE: bool = false;
 const REVENANT_GAME_SETTINGS_DEBUG_BYTES: usize = 0x140;
 static REVENANT_GAME_SETTINGS_BASELINE: LazyLock<Mutex<Option<[u8; REVENANT_GAME_SETTINGS_DEBUG_BYTES]>>> =
     LazyLock::new(|| Mutex::new(None));
+
+const fn atlas_uv_rect(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    atlas_width: f32,
+    atlas_height: f32,
+) -> ([f32; 2], [f32; 2]) {
+    (
+        [x / atlas_width, y / atlas_height],
+        [(x + width) / atlas_width, (y + height) / atlas_height],
+    )
+}
 
 #[derive(Clone, Copy)]
 enum ActiveTextureStyle {
@@ -1272,11 +1523,12 @@ fn draw_png_icon(
     icon_texture: Option<TextureRegion>,
     icon_texture_scale: f32,
     ready: bool,
+    solid: bool,
 ) {
     if let Some(texture) = icon_texture {
         let draw = ui.get_foreground_draw_list();
         let half = radius * 1.03 * icon_texture_scale;
-        let alpha = if ready { 255 } else { 178 };
+        let alpha = hud_alpha(if ready { 255 } else { 178 }, solid);
         draw.add_image(
             texture.texture_id,
             [center[0] - half, center[1] - half],
@@ -1438,14 +1690,14 @@ fn draw_bottom_fill(ui: &Ui, center: [f32; 2], radius: f32, progress: f32, color
     }
 }
 
-fn draw_charge_count(ui: &Ui, center: [f32; 2], radius: f32, count: usize) {
+fn draw_charge_count(ui: &Ui, center: [f32; 2], radius: f32, count: usize, solid: bool) {
     let s = self_scale(radius);
     let digit = count.min(2);
     let origin = [center[0] + radius * 0.57, center[1] + radius * 0.45];
     let text = digit.to_string();
     let font_size = (ui.current_font_size() * 2.48 * s).max(20.8 * s);
     let outline = 1.7 * s;
-    let shadow = ImColor32::from_rgba(0, 0, 0, 235);
+    let shadow = ImColor32::from_rgba(0, 0, 0, hud_alpha(235, solid));
 
     for offset in [
         [-outline, 0.0],
@@ -1464,7 +1716,7 @@ fn draw_charge_count(ui: &Ui, center: [f32; 2], radius: f32, count: usize) {
     draw_sized_text(
         origin,
         font_size,
-        ImColor32::from_rgba(245, 249, 255, 255),
+        ImColor32::from_rgba(245, 249, 255, hud_alpha(255, solid)),
         &text,
     );
 }
@@ -1502,13 +1754,19 @@ fn draw_icon_mark(
     center: [f32; 2],
     radius: f32,
     label: &str,
-    color: ImColor32,
+    _color: ImColor32,
     icon_scale: f32,
+    solid: bool,
 ) {
     let draw = ui.get_foreground_draw_list();
     let s = self_scale(radius) * icon_scale;
-    let white = ImColor32::from_rgba(235, 242, 255, 228);
-    let pale = ImColor32::from_rgba(207, 219, 238, 180);
+    let white = ImColor32::from_rgba(235, 242, 255, hud_alpha(228, solid));
+    let pale = ImColor32::from_rgba(207, 219, 238, hud_alpha(180, solid));
+    let accent = if label == "SKILL" {
+        ImColor32::from_rgba(80, 154, 255, hud_alpha(255, solid))
+    } else {
+        ImColor32::from_rgba(235, 214, 150, hud_alpha(255, solid))
+    };
 
     if label == "SKILL" {
         draw.add_bezier_curve(
@@ -1526,7 +1784,7 @@ fn draw_icon_mark(
             [center[0] - 5.0 * s, center[1] - 8.0 * s],
             [center[0] + 12.0 * s, center[1] - 18.0 * s],
             [center[0] + 28.0 * s, center[1] - 8.0 * s],
-            color,
+            accent,
         )
         .thickness(2.6 * s)
         .num_segments(20)
@@ -1556,7 +1814,7 @@ fn draw_icon_mark(
         draw.add_line(
             [center[0] - 29.0 * s, center[1] - 1.0 * s],
             [center[0] + 3.0 * s, center[1] + 31.0 * s],
-            color,
+            accent,
         )
         .thickness(3.2 * s)
         .build();

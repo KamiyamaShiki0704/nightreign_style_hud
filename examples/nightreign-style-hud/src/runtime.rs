@@ -1,5 +1,6 @@
 static INSTALL_IRONEYE_RUNTIME_TASKS: Once = Once::new();
 static IRONEYE_MANUAL_AIMING: AtomicBool = AtomicBool::new(false);
+static STANDALONE_PRECISION_AIMING: AtomicBool = AtomicBool::new(false);
 static IRONEYE_SUPPRESSED_PRECISION: AtomicBool = AtomicBool::new(false);
 static IRONEYE_SUPPRESSED_HKS_PRECISION: AtomicBool = AtomicBool::new(false);
 static IRONEYE_NORMAL_CAMERA_FOVS: LazyLock<Mutex<Option<IroneyeCameraFovs>>> =
@@ -10,6 +11,24 @@ const IRONEYE_VISUAL_FOV_SCALE: f32 = 1.22;
 const IRONEYE_VISUAL_CAMERA_PULLBACK: f32 = 2.15;
 const IRONEYE_VISUAL_CAMERA_RIGHT_OFFSET: f32 = -0.70;
 const IRONEYE_RETICLE_CONVERGENCE_DISTANCE: f32 = 30.0;
+
+fn ironeye_precision_runtime_enabled(active_effects: &[i32]) -> bool {
+    active_role_from_effects(active_effects) == Some(Role::Ironeye)
+        || active_effects.contains(&SP_STANDALONE_PRECISION_AIM)
+}
+
+fn set_ironeye_precision_aiming(aiming: bool, active_effects: &[i32]) {
+    IRONEYE_MANUAL_AIMING.store(aiming, Ordering::Relaxed);
+    STANDALONE_PRECISION_AIMING.store(
+        aiming && active_effects.contains(&SP_STANDALONE_PRECISION_AIM),
+        Ordering::Relaxed,
+    );
+}
+
+fn clear_ironeye_precision_aiming() {
+    IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+    STANDALONE_PRECISION_AIMING.store(false, Ordering::Relaxed);
+}
 
 #[derive(Clone, Copy)]
 struct IroneyeCameraFovs {
@@ -136,14 +155,14 @@ fn ironeye_draw_pre_task(_: &FD4TaskData) {
 
 fn restore_ironeye_precision_before_behavior() {
     let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+        clear_ironeye_precision_aiming();
         IRONEYE_SUPPRESSED_PRECISION.store(false, Ordering::Relaxed);
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
         return;
     };
     let Some(player) = world_chr_man.main_player.as_mut() else {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+        clear_ironeye_precision_aiming();
         IRONEYE_SUPPRESSED_PRECISION.store(false, Ordering::Relaxed);
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
@@ -155,8 +174,8 @@ fn restore_ironeye_precision_before_behavior() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+    if !ironeye_precision_runtime_enabled(&active_effects) {
+        clear_ironeye_precision_aiming();
         IRONEYE_SUPPRESSED_PRECISION.store(false, Ordering::Relaxed);
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
@@ -171,7 +190,7 @@ fn restore_ironeye_precision_before_behavior() {
         .manual_attack_aiming();
     let precision_shooting = player.chr_ins.chr_flags1c5.precision_shooting();
     let aiming = manual_attack_aiming || precision_shooting;
-    IRONEYE_MANUAL_AIMING.store(aiming, Ordering::Relaxed);
+    set_ironeye_precision_aiming(aiming, &active_effects);
     if !aiming {
         IRONEYE_SUPPRESSED_PRECISION.store(false, Ordering::Relaxed);
         IRONEYE_SUPPRESSED_HKS_PRECISION.store(false, Ordering::Relaxed);
@@ -213,7 +232,7 @@ fn suppress_ironeye_precision_before_camera() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
+    if !ironeye_precision_runtime_enabled(&active_effects) {
         return;
     }
 
@@ -225,7 +244,7 @@ fn suppress_ironeye_precision_before_camera() {
         .manual_attack_aiming();
     let precision_shooting = player.chr_ins.chr_flags1c5.precision_shooting();
     let aiming = manual_attack_aiming || precision_shooting;
-    IRONEYE_MANUAL_AIMING.store(aiming, Ordering::Relaxed);
+    set_ironeye_precision_aiming(aiming, &active_effects);
     if precision_shooting {
         IRONEYE_SUPPRESSED_PRECISION.store(true, Ordering::Relaxed);
         player.chr_ins.chr_flags1c5.set_precision_shooting(false);
@@ -234,13 +253,13 @@ fn suppress_ironeye_precision_before_camera() {
 
 fn update_ironeye_precision_view_after_camera() {
     let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+        clear_ironeye_precision_aiming();
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
         return;
     };
     let Some(player) = world_chr_man.main_player.as_mut() else {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+        clear_ironeye_precision_aiming();
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
         return;
@@ -251,8 +270,8 @@ fn update_ironeye_precision_view_after_camera() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+    if !ironeye_precision_runtime_enabled(&active_effects) {
+        clear_ironeye_precision_aiming();
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
         return;
@@ -267,7 +286,7 @@ fn update_ironeye_precision_view_after_camera() {
     let precision_shooting = player.chr_ins.chr_flags1c5.precision_shooting();
     let aiming =
         manual_attack_aiming || precision_shooting || IRONEYE_SUPPRESSED_PRECISION.load(Ordering::Relaxed);
-    IRONEYE_MANUAL_AIMING.store(aiming, Ordering::Relaxed);
+    set_ironeye_precision_aiming(aiming, &active_effects);
     if !aiming {
         remember_normal_camera_fov();
         remember_normal_game_camera_state();
@@ -303,7 +322,7 @@ fn restore_ironeye_precision_for_projectiles() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
+    if !ironeye_precision_runtime_enabled(&active_effects) {
         return;
     }
     let manual_attack_aiming = player
@@ -313,7 +332,7 @@ fn restore_ironeye_precision_for_projectiles() {
         .action_modifiers_flags
         .manual_attack_aiming();
     if manual_attack_aiming || IRONEYE_SUPPRESSED_PRECISION.load(Ordering::Relaxed) {
-        IRONEYE_MANUAL_AIMING.store(true, Ordering::Relaxed);
+        set_ironeye_precision_aiming(true, &active_effects);
         player.chr_ins.chr_flags1c5.set_precision_shooting(true);
     }
 }
@@ -331,7 +350,7 @@ fn suppress_ironeye_precision_before_menu() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
+    if !ironeye_precision_runtime_enabled(&active_effects) {
         return;
     }
     let manual_attack_aiming = player
@@ -341,7 +360,7 @@ fn suppress_ironeye_precision_before_menu() {
         .action_modifiers_flags
         .manual_attack_aiming();
     if manual_attack_aiming || player.chr_ins.chr_flags1c5.precision_shooting() {
-        IRONEYE_MANUAL_AIMING.store(true, Ordering::Relaxed);
+        set_ironeye_precision_aiming(true, &active_effects);
         IRONEYE_SUPPRESSED_PRECISION.store(true, Ordering::Relaxed);
         player.chr_ins.chr_flags1c5.set_precision_shooting(false);
     }
@@ -363,8 +382,8 @@ fn finish_ironeye_precision_frame_after_scaleform() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
-        IRONEYE_MANUAL_AIMING.store(false, Ordering::Relaxed);
+    if !ironeye_precision_runtime_enabled(&active_effects) {
+        clear_ironeye_precision_aiming();
         return;
     }
     if IRONEYE_SUPPRESSED_HKS_PRECISION.swap(false, Ordering::Relaxed) {
@@ -403,7 +422,7 @@ fn restore_ironeye_visual_camera_for_draw() {
         .entries()
         .map(|entry| entry.param_id)
         .collect::<Vec<_>>();
-    if active_role_from_effects(&active_effects) != Some(Role::Ironeye) {
+    if !ironeye_precision_runtime_enabled(&active_effects) {
         return;
     }
     restore_normal_camera_fov();

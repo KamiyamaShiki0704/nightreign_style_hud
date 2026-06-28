@@ -96,14 +96,21 @@ struct IroneyeIconSet {
 }
 
 #[derive(Clone, Copy, Default)]
+struct PrecisionReticleIconSet {
+    textures: [Option<TextureId>; 3],
+}
+
+#[derive(Clone, Copy, Default)]
 struct RevenantIconSet {
     summon_atlas: Option<TextureId>,
+    controller_buttons: Option<TextureId>,
 }
 
 struct IconSet {
     roles: [RoleIconSet; ROLE_COUNT],
     effects: EffectIconSet,
     ironeye: IroneyeIconSet,
+    standalone_precision: PrecisionReticleIconSet,
     revenant: RevenantIconSet,
     recluse: RecluseIconSet,
     scholar: ScholarIconSet,
@@ -117,6 +124,7 @@ impl Default for IconSet {
             roles: [RoleIconSet::default(); ROLE_COUNT],
             effects: EffectIconSet::default(),
             ironeye: IroneyeIconSet::default(),
+            standalone_precision: PrecisionReticleIconSet::default(),
             revenant: RevenantIconSet::default(),
             recluse: RecluseIconSet::default(),
             scholar: ScholarIconSet::default(),
@@ -144,8 +152,12 @@ impl IconSet {
         self.ironeye = IroneyeIconSet {
             atlas: load_ironeye_atlas(render_context),
         };
+        self.standalone_precision = PrecisionReticleIconSet {
+            textures: load_standalone_precision_reticles(render_context),
+        };
         self.revenant = RevenantIconSet {
             summon_atlas: load_revenant_summon_atlas(render_context),
+            controller_buttons: load_raw_texture(render_context, include_bytes!("../assets/SB_KG.png")),
         };
         self.recluse = RecluseIconSet {
             atlas: load_recluse_atlas(render_context),
@@ -256,6 +268,42 @@ fn load_raw_texture(render_context: &mut dyn RenderContext, bytes: &[u8]) -> Opt
     render_context
         .load_texture(image.as_raw(), width, height)
         .ok()
+}
+
+fn load_texture_file(render_context: &mut dyn RenderContext, path: &Path) -> Option<TextureId> {
+    let bytes = fs::read(path).ok()?;
+    load_raw_texture(render_context, &bytes)
+}
+
+fn load_standalone_precision_reticles(
+    render_context: &mut dyn RenderContext,
+) -> [Option<TextureId>; 3] {
+    const FILES: [[&str; 2]; 3] = [
+        ["Precision_Reticle1.png", "Ironeye_Reticle1.png"],
+        ["Precision_Reticle2.png", "Ironeye_Reticle2.png"],
+        ["Precision_Reticle3.png", "Ironeye_Reticle3.png"],
+    ];
+    const DIRS: [&str; 2] = [
+        r"F:\GoldenAge\dll\nightreign_precision_aim\assets",
+        r"F:\GoldenAge\dll\nightreign\assets",
+    ];
+
+    let mut textures = [None, None, None];
+    for (index, candidates) in FILES.iter().enumerate() {
+        for dir in DIRS {
+            for file in candidates {
+                let path = Path::new(dir).join(file);
+                if let Some(texture) = load_texture_file(render_context, &path) {
+                    textures[index] = Some(texture);
+                    break;
+                }
+            }
+            if textures[index].is_some() {
+                break;
+            }
+        }
+    }
+    textures
 }
 
 fn load_ironeye_atlas(render_context: &mut dyn RenderContext) -> Option<TextureId> {

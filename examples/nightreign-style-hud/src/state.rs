@@ -13,6 +13,7 @@ struct HudSnapshot {
     wylder_skill_lock_pos: Option<[f32; 2]>,
     wylder_skill_lock_scale: f32,
     ironeye_precision_aiming: bool,
+    standalone_precision_aiming: bool,
     ironeye_weakness_marks: [IroneyeWeaknessSnapshot; IRONEYE_WEAKNESS_MAX_TARGETS],
     ironeye_weakness_bursts: [IroneyeWeaknessBurstSnapshot; IRONEYE_WEAKNESS_MAX_BURSTS],
     recluse_elements: [Option<RecluseElement>; 3],
@@ -26,6 +27,7 @@ struct HudSnapshot {
     scholar_damage_numbers: [ScholarDamageNumberSnapshot; SCHOLAR_DAMAGE_NUMBER_MAX],
     scholar_debug: ScholarScanDebug,
     revenant_summons: [RevenantSummonSnapshot; REVENANT_SUMMON_COUNT],
+    revenant_skill_move_hud: bool,
     revenant_effect_mask: u8,
     revenant_active_summon: Option<usize>,
     revenant_buddy_count: usize,
@@ -37,6 +39,7 @@ struct HudSnapshot {
     ultimate_progress: f32,
     ultimate_ready: bool,
     ultimate_top_down: bool,
+    hud_solid: bool,
     undertaker_free_ultimate_active: bool,
     executor_ultimate_active: bool,
 }
@@ -77,16 +80,19 @@ struct ChargeState {
     recluse_blood_brands: HashMap<FieldInsHandle, RecluseBloodBrand>,
     recluse_blood_pending_damage: Vec<RecluseBloodDamageEvent>,
     recluse_blood_debug: RecluseBloodDebug,
+    recluse_blood_fixed_fp_accumulator: f32,
     recluse_outputs_clear_at: Option<Instant>,
     wylder_skill_lock_active: bool,
     wylder_skill_lock_has_target: bool,
     wylder_skill_lock_pos: Option<[f32; 2]>,
     wylder_skill_lock_scale: f32,
+    revenant_skill_move_hud: bool,
     revenant_active_summon: Option<usize>,
     revenant_effect_mask: u8,
     revenant_summon_hp: [f32; REVENANT_SUMMON_COUNT],
     revenant_summon_handles: [Option<FieldInsHandle>; REVENANT_SUMMON_COUNT],
     revenant_summon_effect_seen: [bool; REVENANT_SUMMON_COUNT],
+    revenant_summon_death_locked: [bool; REVENANT_SUMMON_COUNT],
     revenant_summon_restore_timer: [f32; REVENANT_SUMMON_COUNT],
     revenant_buddy_count: usize,
     revenant_known_buddy_handles: Vec<FieldInsHandle>,
@@ -181,16 +187,19 @@ impl ChargeState {
             recluse_blood_brands: HashMap::new(),
             recluse_blood_pending_damage: Vec::new(),
             recluse_blood_debug: RecluseBloodDebug::default(),
+            recluse_blood_fixed_fp_accumulator: 0.0,
             recluse_outputs_clear_at: None,
             wylder_skill_lock_active: false,
             wylder_skill_lock_has_target: false,
             wylder_skill_lock_pos: None,
             wylder_skill_lock_scale: 1.0,
+            revenant_skill_move_hud: false,
             revenant_active_summon: None,
             revenant_effect_mask: 0,
             revenant_summon_hp: [1.0; REVENANT_SUMMON_COUNT],
             revenant_summon_handles: [None; REVENANT_SUMMON_COUNT],
             revenant_summon_effect_seen: [false; REVENANT_SUMMON_COUNT],
+            revenant_summon_death_locked: [false; REVENANT_SUMMON_COUNT],
             revenant_summon_restore_timer: [0.0; REVENANT_SUMMON_COUNT],
             revenant_buddy_count: 0,
             revenant_known_buddy_handles: Vec::new(),
@@ -207,7 +216,7 @@ impl ChargeState {
         self.last_update = now;
 
         let world_chr_man = unsafe { WorldChrMan::instance_mut() }.ok()?;
-        let (active_effects, locked_on_enemy) = {
+        let (active_effects, locked_on_enemy, action_pressed) = {
             let player = world_chr_man.main_player.as_mut()?;
             update_local_damage_module(player);
             let active_effects = player
@@ -216,7 +225,8 @@ impl ChargeState {
                 .entries()
                 .map(|entry| entry.param_id)
                 .collect::<Vec<_>>();
-            (active_effects, player.locked_on_enemy)
+            let action_pressed = player.chr_ins.modules.action_request.action_requests.action();
+            (active_effects, player.locked_on_enemy, action_pressed)
         };
 
         let role = active_role_from_effects(&active_effects);
@@ -249,6 +259,7 @@ impl ChargeState {
             self.ironeye_weakness_bursts.clear();
             let player = world_chr_man.main_player.as_mut()?;
             remove_all_role_outputs(player);
+            remove_revenant_summon_death_effects_from_player(player);
             return None;
         };
 
@@ -277,6 +288,8 @@ impl ChargeState {
         }
         self.update_scholar_targets(world_chr_man, role, &active_effects, delta);
         self.update_wylder_skill_lock(world_chr_man, role, &active_effects);
+        self.revenant_skill_move_hud =
+            role == Role::Revenant && active_effects.contains(&SP_REVENANT_SKILL_MOVE_HUD);
         self.update_scholar_sympathy(world_chr_man, role, &active_effects, locked_on_enemy, now);
         self.update_ironeye_weakness(world_chr_man, role, now, &damage_hook_events);
         self.update_duchess_replay_history(world_chr_man, role);
@@ -310,7 +323,7 @@ impl ChargeState {
         );
         self.sync_output_speffects(player, config);
 
-        Some(self.snapshot(world_chr_man, config, now))
+        Some(self.snapshot(world_chr_man, config, action_pressed, now))
     }
 
     fn reset_for_role(&mut self, role: Option<Role>) {
@@ -342,6 +355,7 @@ impl ChargeState {
         self.wylder_skill_lock_has_target = false;
         self.wylder_skill_lock_pos = None;
         self.wylder_skill_lock_scale = 1.0;
+        self.revenant_skill_move_hud = false;
         self.scholar_targets.clear();
         self.scholar_observing = false;
         self.scholar_sympathy_hp.clear();
@@ -357,6 +371,7 @@ impl ChargeState {
         self.revenant_summon_hp = [1.0; REVENANT_SUMMON_COUNT];
         self.revenant_summon_handles = [None; REVENANT_SUMMON_COUNT];
         self.revenant_summon_effect_seen = [false; REVENANT_SUMMON_COUNT];
+        self.revenant_summon_death_locked = [false; REVENANT_SUMMON_COUNT];
         self.revenant_summon_restore_timer = [0.0; REVENANT_SUMMON_COUNT];
         self.revenant_buddy_count = 0;
         self.revenant_known_buddy_handles.clear();
@@ -383,11 +398,14 @@ impl ChargeState {
             self.revenant_effect_mask = 0;
             self.revenant_summon_handles = [None; REVENANT_SUMMON_COUNT];
             self.revenant_summon_effect_seen = [false; REVENANT_SUMMON_COUNT];
+            self.revenant_summon_death_locked = [false; REVENANT_SUMMON_COUNT];
             self.revenant_summon_restore_timer = [0.0; REVENANT_SUMMON_COUNT];
+            self.revenant_skill_move_hud = false;
             self.revenant_buddy_count = 0;
             self.revenant_known_buddy_handles.clear();
             self.revenant_bind_baseline.clear();
             self.revenant_pending_summon_bind = None;
+            remove_revenant_summon_death_effects(world_chr_man);
             return;
         }
 
@@ -536,8 +554,28 @@ impl ChargeState {
                     .clamp(0.0, 1.0);
             }
         }
+        self.sync_revenant_summon_death_effects(world_chr_man);
         if self.revenant_pending_summon_bind.is_none() {
             self.revenant_known_buddy_handles = current_buddy_handles;
+        }
+    }
+
+    fn sync_revenant_summon_death_effects(&mut self, world_chr_man: &mut WorldChrMan) {
+        let Some(player) = world_chr_man.main_player.as_mut() else {
+            return;
+        };
+        for index in 0..REVENANT_SUMMON_COUNT {
+            let hp_ratio = self.revenant_summon_hp[index].clamp(0.0, 1.0);
+            let effect = REVENANT_SUMMON_DEATH_EFFECTS[index];
+            if hp_ratio <= 0.0 && !self.revenant_summon_death_locked[index] {
+                player.apply_speffect(effect, true);
+                self.revenant_summon_death_locked[index] = true;
+            } else if hp_ratio >= REVENANT_SUMMON_REVIVE_READY_HP_RATIO
+                && self.revenant_summon_death_locked[index]
+            {
+                player.chr_ins.remove_speffect(effect);
+                self.revenant_summon_death_locked[index] = false;
+            }
         }
     }
 
@@ -1240,19 +1278,21 @@ impl ChargeState {
             if event.damage <= 0 {
                 continue;
             }
-            if self
+            let Some(brand) = self
                 .recluse_blood_brands
                 .values()
-                .any(|brand| brand.damage_module == event.target_damage_module)
-            {
-                self.recluse_blood_pending_damage
-                    .push(RecluseBloodDamageEvent {
-                        target_damage_module: event.target_damage_module,
-                        damage: event.damage,
-                        created_at: event.created_at,
-                    });
-                self.recluse_blood_debug.queued += 1;
-            }
+                .find(|brand| brand.damage_module == event.target_damage_module)
+            else {
+                continue;
+            };
+            self.recluse_blood_pending_damage
+                .push(RecluseBloodDamageEvent {
+                    target_damage_module: event.target_damage_module,
+                    damage: event.damage,
+                    created_at: event.created_at,
+                    brand_kind: brand.kind,
+                });
+            self.recluse_blood_debug.queued += 1;
         }
         self.recluse_blood_debug.pending = self.recluse_blood_pending_damage.len();
     }
@@ -1322,8 +1362,24 @@ impl ChargeState {
             if damage <= 0 {
                 continue;
             }
-            let hp_restore = scale_i32(damage, RECLUSE_BLOOD_SOUL_HP_RESTORE_RATE);
-            let fp_restore = scale_i32(damage, RECLUSE_BLOOD_SOUL_FP_RESTORE_RATE);
+            let (hp_restore, fp_restore) = match event.brand_kind {
+                RecluseBloodBrandKind::Normal => (
+                    scale_i32(damage, RECLUSE_BLOOD_SOUL_HP_RESTORE_RATE),
+                    scale_i32(damage, RECLUSE_BLOOD_SOUL_FP_RESTORE_RATE),
+                ),
+                RecluseBloodBrandKind::FixedFpOnly => {
+                    if attacker != player_handle {
+                        continue;
+                    }
+                    (
+                        0,
+                        fixed_fp_restore_for_player(
+                            world_chr_man,
+                            &mut self.recluse_blood_fixed_fp_accumulator,
+                        ),
+                    )
+                }
+            };
             self.recluse_blood_debug.last_damage = damage;
             self.recluse_blood_debug.last_hp_restore = hp_restore;
             self.recluse_blood_debug.last_fp_restore = fp_restore;
@@ -1347,11 +1403,16 @@ impl ChargeState {
 
     fn refresh_recluse_blood_brands(&mut self, world_chr_man: &WorldChrMan) {
         let brand_sp_effect = role_config(Role::Recluse).effect(SP_RECLUSE_BLOOD_SOUL_BRAND);
+        let fixed_fp_sp_effect = SP_RECLUSE_BLOOD_SOUL_FIXED_FP_BRAND;
         let mut seen = Vec::new();
         for entry in world_chr_man.chr_inses_by_distance.iter() {
             let enemy = unsafe { entry.chr_ins.as_ref() };
-            if scholar_reject_reason(enemy).is_some() || !chr_has_speffect(enemy, brand_sp_effect)
-            {
+            if scholar_reject_reason(enemy).is_some() {
+                continue;
+            }
+            let has_normal_brand = chr_has_speffect(enemy, brand_sp_effect);
+            let has_fixed_fp_brand = chr_has_speffect(enemy, fixed_fp_sp_effect);
+            if !has_normal_brand && !has_fixed_fp_brand {
                 continue;
             }
             let damage_module = damage_module_from_chr_ins(enemy);
@@ -1359,8 +1420,18 @@ impl ChargeState {
                 continue;
             }
             let handle = enemy.field_ins_handle;
-            self.recluse_blood_brands
-                .insert(handle, RecluseBloodBrand { damage_module });
+            let kind = if has_normal_brand {
+                RecluseBloodBrandKind::Normal
+            } else {
+                RecluseBloodBrandKind::FixedFpOnly
+            };
+            self.recluse_blood_brands.insert(
+                handle,
+                RecluseBloodBrand {
+                    damage_module,
+                    kind,
+                },
+            );
             seen.push(handle);
         }
         self.recluse_blood_brands
@@ -2146,6 +2217,7 @@ impl ChargeState {
         &self,
         world_chr_man: &WorldChrMan,
         config: &RoleConfig,
+        action_pressed: bool,
         now: Instant,
     ) -> HudSnapshot {
         let skill_ready_count = self.skill_ready_count(config);
@@ -2265,8 +2337,8 @@ impl ChargeState {
             } else {
                 1.0
             },
-            ironeye_precision_aiming: config.role == Role::Ironeye
-                && IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed),
+            ironeye_precision_aiming: IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed),
+            standalone_precision_aiming: STANDALONE_PRECISION_AIMING.load(Ordering::Relaxed),
             ironeye_weakness_marks,
             ironeye_weakness_bursts,
             recluse_elements: if config.role == Role::Recluse {
@@ -2298,6 +2370,7 @@ impl ChargeState {
                 ScholarScanDebug::default()
             },
             revenant_summons,
+            revenant_skill_move_hud: config.role == Role::Revenant && self.revenant_skill_move_hud,
             revenant_effect_mask: if config.role == Role::Revenant {
                 self.revenant_effect_mask
             } else {
@@ -2347,6 +2420,7 @@ impl ChargeState {
             ultimate_progress: self.ultimate,
             ultimate_ready,
             ultimate_top_down,
+            hud_solid: action_pressed,
             undertaker_free_ultimate_active,
             executor_ultimate_active: config.role == Role::Executor
                 && self.executor_transform_end.is_some(),
@@ -3577,6 +3651,19 @@ fn scholar_damage_number_pos(
         .and_then(scholar_target_screen_pos)
 }
 
+fn fixed_fp_restore_for_player(world_chr_man: &WorldChrMan, accumulator: &mut f32) -> i32 {
+    let Some(player) = world_chr_man.main_player.as_ref() else {
+        return 0;
+    };
+    let max_fp = player.chr_ins.modules.as_ref().data.as_ref().max_fp.max(1) as f32;
+    *accumulator += max_fp * RECLUSE_BLOOD_SOUL_FIXED_FP_RESTORE_RATE;
+    let restore = accumulator.floor() as i32;
+    if restore > 0 {
+        *accumulator -= restore as f32;
+    }
+    restore
+}
+
 fn apply_hp_delta_by_handle(
     world_chr_man: &mut WorldChrMan,
     handle: FieldInsHandle,
@@ -3736,6 +3823,18 @@ fn set_effect(player: &mut eldenring::cs::PlayerIns, sp_effect: i32, active: boo
         player.apply_speffect(sp_effect, true);
     } else {
         player.chr_ins.remove_speffect(sp_effect);
+    }
+}
+
+fn remove_revenant_summon_death_effects(world_chr_man: &mut WorldChrMan) {
+    if let Some(player) = world_chr_man.main_player.as_mut() {
+        remove_revenant_summon_death_effects_from_player(player);
+    }
+}
+
+fn remove_revenant_summon_death_effects_from_player(player: &mut eldenring::cs::PlayerIns) {
+    for effect in REVENANT_SUMMON_DEATH_EFFECTS {
+        player.chr_ins.remove_speffect(effect);
     }
 }
 

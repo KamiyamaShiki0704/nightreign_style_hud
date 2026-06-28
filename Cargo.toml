@@ -6,9 +6,11 @@ members = [
     "crates/eldenring",
     "crates/debug",
     "examples/nightreign-style-hud",
+    "examples/nightreign-precision-aim",
 ]
 default-members = [
     "examples/nightreign-style-hud",
+    "examples/nightreign-precision-aim",
 ]
 
 [workspace.package]

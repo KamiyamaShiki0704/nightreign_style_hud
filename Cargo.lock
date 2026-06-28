@@ -721,6 +721,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
 
 [[package]]
+name = "nightreign-precision-aim"
+version = "0.14.0"
+dependencies = [
+ "debug",
+ "eldenring",
+ "fromsoftware-shared",
+ "hudhook",
+ "image",
+ "tracing",
+ "tracing-appender",
+ "tracing-panic",
+ "tracing-subscriber",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "nightreign-style-hud"
 version = "0.14.0"
 dependencies = [

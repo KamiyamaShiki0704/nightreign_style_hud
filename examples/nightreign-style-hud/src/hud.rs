@@ -16,7 +16,6 @@ pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void
 struct ChargeSlot {
     label: &'static str,
     accent: ImColor32,
-    fill: ImColor32,
     icon_scale: f32,
     ready_glow: f32,
 }
@@ -41,14 +40,12 @@ impl NightreignStyleHud {
             skill: ChargeSlot {
                 label: "SKILL",
                 accent: ImColor32::from_rgba(80, 154, 255, 255),
-                fill: ImColor32::from_rgba(80, 154, 255, 122),
                 icon_scale: 0.55,
                 ready_glow: 0.35,
             },
             ultimate: ChargeSlot {
                 label: "ART",
                 accent: ImColor32::from_rgba(235, 214, 150, 255),
-                fill: ImColor32::from_rgba(80, 154, 255, 122),
                 icon_scale: 1.0,
                 ready_glow: 1.0,
             },
@@ -83,15 +80,24 @@ impl ImguiRenderLoop for NightreignStyleHud {
         update_multi_lock_live_bullets();
         let _ = multi_lock_snapshot_targets();
         let Some(snapshot) = self.charges.sync(now) else {
+            if STANDALONE_PRECISION_AIMING.load(Ordering::Relaxed) {
+                draw_standalone_precision_reticle_active(
+                    ui,
+                    &self.icons.standalone_precision,
+                    self.scale,
+                );
+            } else if IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed) {
+                draw_ironeye_precision_reticle_active(ui, &self.icons.ironeye, self.scale);
+            }
             draw_recluse_blood_debug(self.charges.recluse_blood_debug(), self.scale);
             return;
         };
         let role = snapshot.role;
 
         let viewport = ui.io().display_size;
-        let ultimate_radius = 56.0 * self.scale;
+        let ultimate_radius = 70.0 * self.scale;
         let skill_radius = ultimate_radius * 0.7;
-        let gap = 38.0 * self.scale;
+        let gap = 44.0 * self.scale;
         let group_width = skill_radius * 2.0 + gap + ultimate_radius * 2.0;
         let left_edge = viewport[0] * 0.5 - group_width * 0.5;
         let y = viewport[1] - (ultimate_radius + 96.0 * self.scale);
@@ -133,6 +139,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
             },
             false,
             ActiveTextureStyle::Default,
+            snapshot.hud_solid,
             now,
             self.animation_start,
         );
@@ -153,7 +160,6 @@ impl ImguiRenderLoop for NightreignStyleHud {
                 self.animation_start,
             );
         } else if role == Role::Ironeye {
-            draw_ironeye_precision_reticle(ui, &snapshot, &self.icons.ironeye, self.scale);
             draw_ironeye_weakness_marks(
                 ui,
                 &snapshot,
@@ -168,7 +174,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
                 self.icons.wylder_skill_lock,
                 self.scale,
             );
-        } else if role == Role::Revenant {
+        } else if role == Role::Revenant && !snapshot.revenant_skill_move_hud {
             draw_revenant_static_summon_ui(
                 ui,
                 skill_center,
@@ -177,6 +183,24 @@ impl ImguiRenderLoop for NightreignStyleHud {
                 &self.icons.revenant,
                 self.scale,
             );
+        } else if role == Role::Revenant {
+            draw_revenant_skill_move_summon_ui(
+                ui,
+                viewport,
+                &snapshot,
+                &self.icons.revenant,
+                self.scale,
+            );
+        }
+        if snapshot.standalone_precision_aiming {
+            draw_standalone_precision_reticle(
+                ui,
+                &snapshot,
+                &self.icons.standalone_precision,
+                self.scale,
+            );
+        } else {
+            draw_ironeye_precision_reticle(ui, &snapshot, &self.icons.ironeye, self.scale);
         }
         if role == Role::Scholar {
             draw_scholar_damage_numbers(ui, &snapshot);
@@ -213,9 +237,13 @@ impl ImguiRenderLoop for NightreignStyleHud {
             } else {
                 ActiveTextureStyle::Default
             },
+            snapshot.hud_solid,
             now,
             self.animation_start,
         );
+        if snapshot.revenant_skill_move_hud {
+            draw_charge_slot_dim_overlay(ui, ultimate_center, ultimate_radius, self.scale);
+        }
     }
 }
 
