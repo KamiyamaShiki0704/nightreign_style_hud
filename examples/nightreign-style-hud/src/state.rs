@@ -14,6 +14,7 @@ struct HudSnapshot {
     wylder_skill_lock_scale: f32,
     ironeye_precision_aiming: bool,
     standalone_precision_aiming: bool,
+    precision_calibration_aiming: bool,
     ironeye_weakness_marks: [IroneyeWeaknessSnapshot; IRONEYE_WEAKNESS_MAX_TARGETS],
     ironeye_weakness_bursts: [IroneyeWeaknessBurstSnapshot; IRONEYE_WEAKNESS_MAX_BURSTS],
     recluse_elements: [Option<RecluseElement>; 3],
@@ -232,6 +233,7 @@ impl ChargeState {
         let role = active_role_from_effects(&active_effects);
         let damage_hook_events = drain_damage_hook_events();
         self.update_recluse_blood_song(world_chr_man, now, &damage_hook_events);
+        sync_precision_calibration_outputs(world_chr_man, &active_effects);
         set_revenant_summon_range_hook_active(role == Some(Role::Revenant));
         if role != self.role {
             if let Some(old_role) = self.role {
@@ -818,6 +820,7 @@ impl ChargeState {
                 npc_think_param_id: candidate.npc_think_param_id,
                 event_entity_id: 0,
                 talk_id: 0,
+                is_player: false,
                 pos_x: candidate.position.0,
                 pos_y: candidate.position.1,
                 pos_z: candidate.position.2,
@@ -2339,6 +2342,7 @@ impl ChargeState {
             },
             ironeye_precision_aiming: IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed),
             standalone_precision_aiming: STANDALONE_PRECISION_AIMING.load(Ordering::Relaxed),
+            precision_calibration_aiming: PRECISION_CALIBRATION_AIMING.load(Ordering::Relaxed),
             ironeye_weakness_marks,
             ironeye_weakness_bursts,
             recluse_elements: if config.role == Role::Recluse {
@@ -2457,6 +2461,52 @@ fn wylder_skill_lock_target_pos(world_chr_man: &WorldChrMan) -> Option<([f32; 2]
     };
     wylder_skill_lock_enemy_target_pos(world_chr_man, player)
         .or_else(|| wylder_skill_lock_wall_target_pos(player))
+}
+
+fn sync_precision_calibration_outputs(
+    world_chr_man: &mut WorldChrMan,
+    active_effects: &[i32],
+) {
+    let calibration_active = active_effects.contains(&SP_PRECISION_CALIBRATION);
+    let has_target = calibration_active && precision_calibration_has_enemy_target(world_chr_man);
+    let Some(player) = world_chr_man.main_player.as_mut() else {
+        return;
+    };
+
+    if !calibration_active {
+        player
+            .chr_ins
+            .remove_speffect(SP_PRECISION_CALIBRATION_NO_TARGET);
+        player
+            .chr_ins
+            .remove_speffect(SP_PRECISION_CALIBRATION_TARGET);
+        return;
+    }
+
+    let desired = if has_target {
+        SP_PRECISION_CALIBRATION_TARGET
+    } else {
+        SP_PRECISION_CALIBRATION_NO_TARGET
+    };
+    let undesired = if has_target {
+        SP_PRECISION_CALIBRATION_NO_TARGET
+    } else {
+        SP_PRECISION_CALIBRATION_TARGET
+    };
+
+    if active_effects.contains(&undesired) {
+        player.chr_ins.remove_speffect(undesired);
+    }
+    if !active_effects.contains(&desired) {
+        player.apply_speffect(desired, true);
+    }
+}
+
+fn precision_calibration_has_enemy_target(world_chr_man: &WorldChrMan) -> bool {
+    let Some(player) = world_chr_man.main_player.as_ref() else {
+        return false;
+    };
+    wylder_skill_lock_enemy_target_pos(world_chr_man, player).is_some()
 }
 
 fn wylder_skill_lock_enemy_target_pos(

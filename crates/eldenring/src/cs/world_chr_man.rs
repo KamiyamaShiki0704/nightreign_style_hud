@@ -150,6 +150,7 @@ impl WorldChrMan {
         self.debug_chr_creator.init_data.npc_think_param_id = request.npc_think_param_id;
         self.debug_chr_creator.init_data.event_entity_id = request.event_entity_id;
         self.debug_chr_creator.init_data.talk_id = request.talk_id;
+        self.debug_chr_creator.init_data.is_player = request.is_player;
 
         self.debug_chr_creator.init_data.spawn_position =
             F32Vector4(request.pos_x, request.pos_y, request.pos_z, 0.0);
@@ -165,6 +166,7 @@ pub struct ChrDebugSpawnRequest {
     pub npc_think_param_id: i32,
     pub event_entity_id: i32,
     pub talk_id: i32,
+    pub is_player: bool,
     pub pos_x: f32,
     pub pos_y: f32,
     pub pos_z: f32,
@@ -210,7 +212,7 @@ pub struct CSDebugChrCreatorInitData {
     name_capacity: usize,
     unkb8: usize,
     unkc0: usize,
-    enemy_type: u8,
+    is_player: bool,
     hamari_simulate: bool,
     unkca: [u8; 0x2],
     pub chara_init_param_id: i32,

@@ -299,6 +299,29 @@ runtime writes `880005` for ultimate readiness.
   selected animations. Current tuned behavior emphasizes vertical influence
   without allowing the earlier extreme launch behavior.
 
+### Precision Calibration
+
+Precision calibration is role-independent and reuses the precision aiming
+camera behavior without drawing a HUD reticle.
+
+| Player Speffect | Meaning |
+| ---: | --- |
+| `883110` | Activates precision calibration mode |
+| `883111` | Output state: active but no valid enemy target in sight |
+| `883112` | Output state: active and a valid enemy target is locked by sight |
+
+Behavior:
+
+- While `883110` is present, the player enters the same visual precision aim
+  camera state used by the standalone precision aim mode.
+- No precision reticle HUD is rendered for this mode.
+- Target detection reuses the Wylder/Scholar-style enemy screen range and
+  line-of-sight checks.
+- The DLL keeps exactly one output state on the player:
+  - `883111` when no valid enemy is detected.
+  - `883112` when an enemy is detected.
+- Removing `883110` clears both `883111` and `883112`.
+
 ### Multi-Lock
 
 Multi-lock is role-independent.

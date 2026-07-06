@@ -86,7 +86,9 @@ impl ImguiRenderLoop for NightreignStyleHud {
                     &self.icons.standalone_precision,
                     self.scale,
                 );
-            } else if IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed) {
+            } else if IRONEYE_MANUAL_AIMING.load(Ordering::Relaxed)
+                && !PRECISION_CALIBRATION_AIMING.load(Ordering::Relaxed)
+            {
                 draw_ironeye_precision_reticle_active(ui, &self.icons.ironeye, self.scale);
             }
             draw_recluse_blood_debug(self.charges.recluse_blood_debug(), self.scale);

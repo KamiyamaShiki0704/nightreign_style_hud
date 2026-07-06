@@ -695,7 +695,7 @@ fn draw_ironeye_precision_reticle(
     icons: &IroneyeIconSet,
     scale: f32,
 ) {
-    if !snapshot.ironeye_precision_aiming {
+    if !snapshot.ironeye_precision_aiming || snapshot.precision_calibration_aiming {
         return;
     }
     draw_ironeye_precision_reticle_active(ui, icons, scale);

@@ -1,0 +1,17 @@
+[package]
+name = "nightreign-attack-summon"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+eldenring.workspace = true
+fromsoftware-shared.workspace = true
+serde.workspace = true
+toml.workspace = true
+windows.workspace = true
+
+[lib]
+crate-type = ["cdylib"]

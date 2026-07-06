@@ -7,10 +7,12 @@ members = [
     "crates/debug",
     "examples/nightreign-style-hud",
     "examples/nightreign-precision-aim",
+    "examples/nightreign-attack-summon",
 ]
 default-members = [
     "examples/nightreign-style-hud",
     "examples/nightreign-precision-aim",
+    "examples/nightreign-attack-summon",
 ]
 
 [workspace.package]
