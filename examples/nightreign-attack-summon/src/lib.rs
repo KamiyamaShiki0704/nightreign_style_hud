@@ -193,6 +193,8 @@ struct AttackSummonSettings {
     any_trigger_cooldown_ms: u64,
     #[serde(default = "default_reuse_spawned_units")]
     reuse_spawned_units: bool,
+    #[serde(default = "default_disable_lock_on")]
+    disable_lock_on: bool,
     #[serde(default = "default_summons")]
     summons: Vec<AttackSummonConfig>,
 }
@@ -211,6 +213,7 @@ impl Default for AttackSummonSettings {
             same_trigger_cooldown_ms: default_same_trigger_cooldown_ms(),
             any_trigger_cooldown_ms: default_any_trigger_cooldown_ms(),
             reuse_spawned_units: default_reuse_spawned_units(),
+            disable_lock_on: default_disable_lock_on(),
             summons: default_summons(),
         }
     }
@@ -219,10 +222,6 @@ impl Default for AttackSummonSettings {
 impl AttackSummonSettings {
     fn unbound_timeout(&self) -> Duration {
         Duration::from_millis(self.unbound_timeout_ms.max(1))
-    }
-
-    fn fallback_lifetime(&self) -> Duration {
-        Duration::from_millis(self.fallback_lifetime_ms.max(1))
     }
 
     fn same_trigger_cooldown(&self) -> Duration {
@@ -296,6 +295,58 @@ struct AttackSummonConfig {
     side_offset: f32,
     #[serde(default)]
     is_player: bool,
+    #[serde(default)]
+    marker_speffect: Option<i32>,
+    #[serde(default)]
+    vanish_request_speffect: Option<i32>,
+    #[serde(default)]
+    generated_team_type: Option<u8>,
+    #[serde(default)]
+    fallback_lifetime_ms: Option<u64>,
+    #[serde(default)]
+    spawn_forward_distance: Option<f32>,
+    #[serde(default)]
+    spawn_height_offset: Option<f32>,
+    #[serde(default)]
+    disable_lock_on: Option<bool>,
+}
+
+impl AttackSummonConfig {
+    fn marker_speffect(&self, settings: &AttackSummonSettings) -> i32 {
+        self.marker_speffect.unwrap_or(settings.marker_speffect)
+    }
+
+    fn vanish_request_speffect(&self, settings: &AttackSummonSettings) -> i32 {
+        self.vanish_request_speffect
+            .unwrap_or(settings.vanish_request_speffect)
+    }
+
+    fn generated_team_type(&self, settings: &AttackSummonSettings) -> u8 {
+        self.generated_team_type
+            .unwrap_or(settings.generated_team_type)
+    }
+
+    fn fallback_lifetime(&self, settings: &AttackSummonSettings) -> Duration {
+        Duration::from_millis(
+            self.fallback_lifetime_ms
+                .unwrap_or(settings.fallback_lifetime_ms)
+                .max(1),
+        )
+    }
+
+    fn spawn_forward_distance(&self, settings: &AttackSummonSettings) -> f32 {
+        self.spawn_forward_distance
+            .unwrap_or(settings.spawn_forward_distance)
+    }
+
+    fn spawn_height_offset(&self, settings: &AttackSummonSettings) -> f32 {
+        self.spawn_height_offset
+            .unwrap_or(settings.spawn_height_offset)
+    }
+
+    fn disable_lock_on(&self, settings: &AttackSummonSettings) -> bool {
+        self.disable_lock_on.unwrap_or(settings.disable_lock_on)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -379,7 +430,7 @@ impl AttackSummonState {
                     if let Some(chr) = chr_by_handle_mut(world_chr_man, handle) {
                         activate_existing_summon(chr, position, config, settings);
                         self.summons[index].requested_at = now;
-                        self.summons[index].expires_at = now + settings.fallback_lifetime();
+                        self.summons[index].expires_at = now + config.fallback_lifetime(settings);
                         self.summons[index].active = true;
                         self.summons[index].pending_bind = false;
                         return;
@@ -419,7 +470,7 @@ impl AttackSummonState {
         self.summons.push(AttackSummonInstance {
             config_index,
             requested_at: now,
-            expires_at: now + settings.fallback_lifetime(),
+            expires_at: now + config.fallback_lifetime(settings),
             handle: None,
             active: true,
             pending_bind: true,
@@ -481,7 +532,7 @@ impl AttackSummonState {
             return;
         };
 
-        prepare_summon(chr, settings);
+        prepare_summon(chr, config, settings);
         chr.modules.as_mut().event.as_mut().request_animation_id = config.animation_id;
         self.summons[summon_index].handle = Some(chr.field_ins_handle);
         self.summons[summon_index].active = true;
@@ -506,6 +557,7 @@ fn summon_should_disappear(
     if now >= summon.expires_at {
         return true;
     }
+    let config = settings.summons[summon.config_index];
 
     let Some(handle) = summon.handle else {
         return false;
@@ -514,11 +566,12 @@ fn summon_should_disappear(
         return true;
     };
 
-    if chr_dead_or_disabled(chr) || chr_has_speffect(chr, settings.vanish_request_speffect) {
+    if chr_dead_or_disabled(chr) || chr_has_speffect(chr, config.vanish_request_speffect(settings))
+    {
         return true;
     }
 
-    prepare_summon(chr, settings);
+    prepare_summon(chr, config, settings);
     false
 }
 
@@ -530,9 +583,13 @@ fn summon_position(
     settings: &AttackSummonSettings,
 ) -> HavokPosition {
     HavokPosition(
-        player_pos.0 + forward.0 * settings.spawn_forward_distance + right.0 * config.side_offset,
-        player_pos.1 + settings.spawn_height_offset,
-        player_pos.2 + forward.2 * settings.spawn_forward_distance + right.2 * config.side_offset,
+        player_pos.0
+            + forward.0 * config.spawn_forward_distance(settings)
+            + right.0 * config.side_offset,
+        player_pos.1 + config.spawn_height_offset(settings),
+        player_pos.2
+            + forward.2 * config.spawn_forward_distance(settings)
+            + right.2 * config.side_offset,
         0.0,
     )
 }
@@ -543,8 +600,8 @@ fn activate_existing_summon(
     config: AttackSummonConfig,
     settings: &AttackSummonSettings,
 ) {
-    chr.remove_speffect(settings.vanish_request_speffect);
-    prepare_summon(chr, settings);
+    chr.remove_speffect(config.vanish_request_speffect(settings));
+    prepare_summon(chr, config, settings);
     move_summon(chr, position);
     restore_summon_hp(chr);
     chr.modules.as_mut().event.as_mut().request_animation_id = -1;
@@ -559,12 +616,20 @@ fn move_summon(chr: &mut ChrIns, position: HavokPosition) {
     chr.chunk_position = F32Vector4(position.0, position.1, position.2, 0.0);
 }
 
-fn prepare_summon(chr: &mut ChrIns, settings: &AttackSummonSettings) {
-    if !chr_has_speffect(chr, settings.marker_speffect) {
-        chr.apply_speffect(settings.marker_speffect, true);
+fn prepare_summon(chr: &mut ChrIns, config: AttackSummonConfig, settings: &AttackSummonSettings) {
+    let marker_speffect = config.marker_speffect(settings);
+    if !chr_has_speffect(chr, marker_speffect) {
+        chr.apply_speffect(marker_speffect, true);
     }
 
-    chr.team_type = settings.generated_team_type;
+    chr.team_type = config.generated_team_type(settings);
+    chr.chr_ctrl
+        .as_mut()
+        .modifier
+        .as_mut()
+        .data
+        .action_flags
+        .set_disable_lock_on(config.disable_lock_on(settings));
     chr.last_hit_by = FieldInsHandle::none();
     chr.load_state.set_extinction_death(false);
     chr.chr_flags1c4.set_is_render_group_enabled(true);
@@ -609,8 +674,9 @@ fn park_summon(
         summon.pending_bind = false;
         return;
     };
+    let config = settings.summons[summon.config_index];
 
-    chr.remove_speffect(settings.vanish_request_speffect);
+    chr.remove_speffect(config.vanish_request_speffect(settings));
     restore_summon_hp(chr);
     chr.modules.as_mut().event.as_mut().request_animation_id = -1;
     chr.chr_flags1c5.set_death_flag(false);
@@ -726,6 +792,10 @@ fn default_reuse_spawned_units() -> bool {
     true
 }
 
+fn default_disable_lock_on() -> bool {
+    false
+}
+
 fn default_config_chr_id() -> i32 {
     4205
 }
@@ -743,6 +813,13 @@ fn default_summons() -> Vec<AttackSummonConfig> {
             animation_id: 20010,
             side_offset: -1.25,
             is_player: false,
+            marker_speffect: None,
+            vanish_request_speffect: None,
+            generated_team_type: None,
+            fallback_lifetime_ms: None,
+            spawn_forward_distance: None,
+            spawn_height_offset: None,
+            disable_lock_on: None,
         },
         AttackSummonConfig {
             trigger_speffect: 14200121,
@@ -755,6 +832,13 @@ fn default_summons() -> Vec<AttackSummonConfig> {
             animation_id: 20011,
             side_offset: -0.75,
             is_player: false,
+            marker_speffect: None,
+            vanish_request_speffect: None,
+            generated_team_type: None,
+            fallback_lifetime_ms: None,
+            spawn_forward_distance: None,
+            spawn_height_offset: None,
+            disable_lock_on: None,
         },
         AttackSummonConfig {
             trigger_speffect: 14200122,
@@ -767,6 +851,13 @@ fn default_summons() -> Vec<AttackSummonConfig> {
             animation_id: 20012,
             side_offset: -0.25,
             is_player: false,
+            marker_speffect: None,
+            vanish_request_speffect: None,
+            generated_team_type: None,
+            fallback_lifetime_ms: None,
+            spawn_forward_distance: None,
+            spawn_height_offset: None,
+            disable_lock_on: None,
         },
         AttackSummonConfig {
             trigger_speffect: 14200123,
@@ -779,6 +870,13 @@ fn default_summons() -> Vec<AttackSummonConfig> {
             animation_id: 20013,
             side_offset: 0.25,
             is_player: false,
+            marker_speffect: None,
+            vanish_request_speffect: None,
+            generated_team_type: None,
+            fallback_lifetime_ms: None,
+            spawn_forward_distance: None,
+            spawn_height_offset: None,
+            disable_lock_on: None,
         },
         AttackSummonConfig {
             trigger_speffect: 14200124,
@@ -791,6 +889,13 @@ fn default_summons() -> Vec<AttackSummonConfig> {
             animation_id: 20017,
             side_offset: 0.75,
             is_player: false,
+            marker_speffect: None,
+            vanish_request_speffect: None,
+            generated_team_type: None,
+            fallback_lifetime_ms: None,
+            spawn_forward_distance: None,
+            spawn_height_offset: None,
+            disable_lock_on: None,
         },
         AttackSummonConfig {
             trigger_speffect: 14200125,
@@ -803,6 +908,13 @@ fn default_summons() -> Vec<AttackSummonConfig> {
             animation_id: 20018,
             side_offset: 1.25,
             is_player: false,
+            marker_speffect: None,
+            vanish_request_speffect: None,
+            generated_team_type: None,
+            fallback_lifetime_ms: None,
+            spawn_forward_distance: None,
+            spawn_height_offset: None,
+            disable_lock_on: None,
         },
     ]
 }

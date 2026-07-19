@@ -43,6 +43,7 @@ Configurable global fields:
 - `same_trigger_cooldown_ms`
 - `any_trigger_cooldown_ms`
 - `reuse_spawned_units`
+- `disable_lock_on`
 
 When `reuse_spawned_units = true`, each summon entry keeps one generated entity in an idle hidden state after it ends. Later triggers reuse that entity instead of creating another debug character. This keeps the debug/enemy pool from growing every time the effect is used.
 
@@ -58,6 +59,17 @@ Each `[[summons]]` entry can customize:
 - `animation_id`
 - `side_offset`
 - `is_player`
+- `marker_speffect` optional override
+- `vanish_request_speffect` optional override
+- `generated_team_type` optional override
+- `fallback_lifetime_ms` optional override
+- `spawn_forward_distance` optional override
+- `spawn_height_offset` optional override
+- `disable_lock_on` optional override
+
+For optional override fields, the DLL uses the entry value when present. If the entry does not define it, the global value is used.
+
+`disable_lock_on = true` sets the generated character's `disable_lock_on` action flag while it is active. This is intended to make the whole generated unit unable to be locked on to; it is not the same as disabling one specific lock-on point ID.
 
 Build:
 

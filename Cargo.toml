@@ -8,11 +8,13 @@ members = [
     "examples/nightreign-style-hud",
     "examples/nightreign-precision-aim",
     "examples/nightreign-attack-summon",
+    "examples/nightreign-camera-debug",
 ]
 default-members = [
     "examples/nightreign-style-hud",
     "examples/nightreign-precision-aim",
     "examples/nightreign-attack-summon",
+    "examples/nightreign-camera-debug",
 ]
 
 [workspace.package]
