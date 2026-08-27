@@ -15,6 +15,8 @@ use fromsoftware_shared::game_version::{GameVersion, LANG_ID_EN, LANG_ID_JP};
 enum ERGameVersion {
     Ww262,
     Jp2621,
+    Ww2700,
+    Jp2701,
 }
 
 impl GameVersion for ERGameVersion {
@@ -24,6 +26,8 @@ impl GameVersion for ERGameVersion {
         match (lang_id, version) {
             (LANG_ID_EN, "2.6.2.0") => Some(Self::Ww262),
             (LANG_ID_JP, "2.6.2.1") => Some(Self::Jp2621),
+            (LANG_ID_EN, "2.7.0.0") => Some(Self::Ww2700),
+            (LANG_ID_JP, "2.7.0.1") => Some(Self::Jp2701),
             _ => None,
         }
     }
@@ -32,8 +36,10 @@ impl GameVersion for ERGameVersion {
 impl ERGameVersion {
     const fn rvas(self) -> RvaBundle {
         match self {
-            Self::Ww262 => rva_ww::RVAS,
-            Self::Jp2621 => rva_jp::RVAS,
+            Self::Ww262 => rva_ww::RVAS_262,
+            Self::Jp2621 => rva_jp::RVAS_2621,
+            Self::Ww2700 => rva_ww::RVAS_2700,
+            Self::Jp2701 => rva_jp::RVAS_2701,
         }
     }
 }
@@ -52,4 +58,65 @@ pub fn get() -> &'static RvaBundle {
     });
 
     &RVAS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_retained_and_current_executable_versions() {
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_EN, "2.6.2.0"),
+            Some(ERGameVersion::Ww262)
+        );
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_JP, "2.6.2.1"),
+            Some(ERGameVersion::Jp2621)
+        );
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_EN, "2.7.0.0"),
+            Some(ERGameVersion::Ww2700)
+        );
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_JP, "2.7.0.1"),
+            Some(ERGameVersion::Jp2701)
+        );
+    }
+
+    #[test]
+    fn rejects_unmapped_executable_versions() {
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_EN, "2.7.0.1"),
+            None
+        );
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_JP, "2.7.0.0"),
+            None
+        );
+        assert_eq!(
+            ERGameVersion::from_lang_version(LANG_ID_EN, "2.8.0.0"),
+            None
+        );
+    }
+
+    #[test]
+    fn selects_version_specific_bullet_spawn_rvas() {
+        assert_eq!(
+            ERGameVersion::Ww262.rvas().cs_bullet_manager_spawn_bullet,
+            0x3a2ca0
+        );
+        assert_eq!(
+            ERGameVersion::Jp2621.rvas().cs_bullet_manager_spawn_bullet,
+            0x3a2ca0
+        );
+        assert_eq!(
+            ERGameVersion::Ww2700.rvas().cs_bullet_manager_spawn_bullet,
+            0x3a2cb0
+        );
+        assert_eq!(
+            ERGameVersion::Jp2701.rvas().cs_bullet_manager_spawn_bullet,
+            0x3a2cb0
+        );
+    }
 }

@@ -15,7 +15,7 @@ use eldenring::{
         CSFeManHudState, CSFeManImp, CSHavokMan, CSNowLoadingHelper, CSTaskGroupIndex, CSTaskImp,
         CSWindowImp, ChrDebugSpawnRequest, ChrIns, ChrInsExt, ChrType, EnemyIns, FieldInsHandle,
         FieldInsType, GameDataMan, GameMan, LockCamParam, PlayerIns, SoloParamRepository,
-        SpEffectParam, WorldChrMan,
+        SpEffectParam, WorldChrMan, bullet_spawn_rva,
     },
     fd4::FD4TaskData,
     position::{DirectionalVector, HavokPosition, PositionDelta},

@@ -22,6 +22,17 @@ Output:
 target\x86_64-pc-windows-msvc\release\nightreign_style_hud.dll
 ```
 
+### Supported Game Versions
+
+The bundled runtime mappings explicitly support these Elden Ring executable
+versions and reject unknown versions instead of installing hooks at guessed
+addresses:
+
+| Region | Executable version |
+| --- | --- |
+| Worldwide | `2.6.2.0`, `2.7.0.0` |
+| Japanese | `2.6.2.1`, `2.7.0.1` |
+
 ## Runtime Overview
 
 The DLL reads player and enemy state every frame, draws the custom HUD with
@@ -31,6 +42,30 @@ TAE/EzState events, and DLL-side runtime systems.
 Most role actions are driven by short-lived Speffects on the player. The DLL
 consumes those input Speffects, updates internal meters, and may apply output
 Speffects back to the player or enemies.
+
+### Resolution Scaling
+
+The custom HUD uses the active ImGui render viewport rather than a cached game
+window width. `2560x1440` is the `1.0` layout reference, and the smaller of the
+width and height ratios controls the final scale:
+
+```text
+scale = min(viewport_width / 2560, viewport_height / 1440)
+```
+
+This preserves the current `3840x2160` appearance at scale `1.5` while making
+the HUD keep the same screen-relative proportions at lower resolutions:
+
+| Viewport | HUD scale |
+| --- | ---: |
+| `3840x2160` | `1.5` |
+| `2560x1440` | `1.0` |
+| `1920x1080` | `0.75` |
+| `1280x720` | `0.5` |
+| `960x540` | `0.375` |
+
+Ultrawide viewports are limited by their height ratio, so `3440x1440` remains
+at scale `1.0`. Valid small resolutions are not forced to a minimum scale.
 
 ## Role Selection
 
@@ -112,6 +147,80 @@ runtime writes `880005` for ultimate readiness.
   - No valid target falls back to a red center reticle.
   - The reticle attaches to the selected enemy or ray-hit point and scales by
     distance: close targets are larger, far targets are smaller.
+- Native hookshot hit resolution:
+  - Keep `883120` on the player for the complete hook collision/settlement
+    window; removing it resets the attempt and clears all result outputs.
+  - The normal enemy-hit Atk must attach `883121` to its target and use damage
+    level 2. Target `c9997` consumes that marker and emits `883122` when damage
+    motion is accepted or `883123` when it is rejected.
+  - Player output `883124` means the enemy accepted the impact and should be
+    pulled by the Atk's `knockback_dist`.
+  - Player output `883125` means the enemy rejected the impact and the player
+    should branch into pull-to-enemy behavior.
+  - Player output `883126` is reserved for a proven map-only collision with no
+    enemy result in the arbitration update.
+  - Use Bullet `30910000` as a stationary, short-lived map sensor emitted from
+    the hook attack point during its active frames. Configure its map impact to
+    create child Bullet `30910001`; the DLL observes only that child as the map
+    receipt and uses its spawn position as the pull destination.
+  - Both `30910000` and `30910001` are excluded from multi-lock retargeting and
+    cloning. A receipt is accepted only while player input `883120` is active
+    and only when the child owner is the local player or a player-owned parent
+    Bullet. Enemy-owned and other players' receipts are ignored.
+  - Configure the sensor so characters are penetrated and map collision ends
+    it. Empty-space lifetime expiry must not create `30910001`; otherwise a
+    miss would be misclassified as a wall hit.
+  - A valid `30910001` receipt enters the existing one-update arbitration
+    delay. Target `883122/883123` always wins if it appears during that delay.
+  - The first candidate native dispatcher at Elden Ring 2.6.2 RVA `0x44BA40`
+    (`0x44BFA0` on 2.7.0.0) did not emit this output for player AtkParam
+    `498210`, even after its hit type was changed to `3`; it remains diagnostic
+    rather than required by the Bullet route.
+  - The current diagnostic build displays `[DEBUG-wylder-map-a41c]` in the
+    top-left while `883120` is active. Its counters separately report hook
+    installation, entry calls, last collision kind, kind-3 calls, local-player
+    owner matches, `883120` matches, finite contacts, completed captures, and
+    `30910001` receipt seen/owner/capture counts.
+    These counters are observational and never authorize `883124..883126`.
+  - A third diagnostic line hooks the final PC/NPC AtkParam lookup and filters
+    exact AtkParam ID `498210`. It reports lookup-hook status, lookup count,
+    table selector (`PC(1)` is expected), and a validated immediate return RVA
+    from the direct call into the lookup. The `s30` and `s70` values are retained
+    stack words for comparison only and are not labelled as callers. This
+    identifies the real direct lookup call site without changing gameplay.
+  - Two additional diagnostic lines observe the native impact-effect function
+    at Elden Ring 2.6.2 RVA `0x708A40` (`0x709890` on 2.7.0.0). While `883120`
+    is active they report
+    exact `PC AtkParam 498210` impact contexts, per-caller counts for return
+    RVAs `38B6F5`, `44AFF7`, and `6DE302`, plus the context's world position at
+    `+0x1A0`. This remains observational until wall/enemy/miss tests prove one
+    caller pattern is map-specific.
+  - Internal pulse `883127` belongs to the disproven player-`c0000` experiment
+    and is no longer required for native map detection. It remains accepted by
+    the resolver temporarily for compatibility and must not be used as an
+    action branch or applied manually.
+  - Enemy results always take priority over map contact. The held-skill HUD's
+    line-of-sight ray is visual preview only and never authorizes these outputs.
+- Pull-movement stop detection:
+  - Apply and maintain player input `883128` only while the HKS/TAE pull
+    movement is actually running. This input does not start movement and the
+    DLL never writes player position or velocity.
+  - The DLL applies player output `883129` once when the active pull reaches or
+    passes its destination. HKS should detect `883129`, branch to the movement
+    stop/break action, and remove `883128` as that branch begins.
+  - Enemy pulls retain the resolved enemy handle and follow its live physics
+    position. Map pulls freeze the proven native contact when available;
+    otherwise the held-skill wall point is used only as the destination of an
+    already-authorized movement.
+  - Current stop distances are `1.50` game units for an enemy and `0.90` for a
+    fixed map point. A short `0.08s` startup grace prevents an immediate break.
+    Crossing the target plane or moving away after the closest approach also
+    emits the stop request so a large animation frame step cannot skip it.
+  - `883129` is emitted at most once per `883128` activation and is removed
+    when `883128` ends. No valid destination means no stop output.
+  - Neither `883128` nor `883129` authorizes `883126` or chooses the
+    enemy-vs-map branch. Native map-hit authorization remains a separate,
+    unresolved investigation.
 
 ### Guardian
 
@@ -131,6 +240,9 @@ runtime writes `880005` for ultimate readiness.
   - DLL applies `880219` when the mark breaks.
   - Mark lasts 17s.
   - Accumulated damage threshold is 20% of the enemy's max HP.
+  - The HUD marker and break burst are hidden while the marked enemy is behind
+    the camera or outside the screen; the underlying mark remains active and
+    reappears when the enemy returns to view.
   - Damage bonus while marked is expected to be handled parameter-side.
 - Precision aiming:
   - Native `SB_Reticle` is hidden.
@@ -191,6 +303,16 @@ runtime writes `880005` for ultimate readiness.
   - `880553` = family slot 3 died and has not recovered to 50% HP.
   - The DLL applies the marker once when the remembered HP reaches 0, then
     removes it after that family regenerates to at least 50% HP.
+- Family active markers on the player:
+  - `880555` = Helen is alive and present in the world.
+  - `880556` = Frederick is alive and present in the world.
+  - `880557` = Sebastian is alive and present in the world.
+  - These outputs are mutually exclusive and are applied only after the Buddy
+    entity is bound. They are removed on recall, death, disappearance, or role
+    change; the transient summon inputs do not directly control them.
+  - Entering a new loading cycle (including teleport/rest map refreshes) clears
+    the active family highlight, cached Buddy binding, and all three active
+    markers. Remembered family HP and death/recovery progress are preserved.
 - Summon range is patched for Revenant so Buddy summon range is effectively
   expanded to 1000.
 - Passive conversion:
@@ -234,7 +356,8 @@ runtime writes `880005` for ultimate readiness.
     this Speffect, the player restores fixed FP equal to 0.1% of max FP per
     hit. This variant does not restore HP.
 - Stored element UI is drawn by the DLL.
-- Locked target elemental trace is cleared when absorbed.
+- The locked-target elemental trace is drawn at 75% of its previous size and
+  is cleared when absorbed.
 
 ### Executor
 
@@ -290,6 +413,18 @@ runtime writes `880005` for ultimate readiness.
   - Free ultimate window: 4s.
 
 ## Independent Systems
+
+### Resurrection Accumulation HUD
+
+- Player visibility Speffect: `102108`.
+- The widget is role-independent and appears at the upper center of the screen.
+- `ResurrectionAccumulation_1.png` is the persistent base while active.
+- `ResurrectionAccumulation_2.png` is clipped to the player's current
+  `sa_durability / sa_durability_max` ratio.
+- At full super armor all three purple sections are visible. As super armor is
+  reduced, the overlay disappears counterclockwise from the upper-left; at zero
+  none of the purple overlay remains.
+- Removing `102108` hides the complete widget.
 
 ### Camera-Directed Movement
 

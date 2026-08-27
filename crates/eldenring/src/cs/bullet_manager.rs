@@ -71,6 +71,11 @@ pub struct CSBulletManager {
 
 type FnSpawnBullet = extern "C" fn(&mut CSBulletManager, &mut i32, &BulletSpawnData, &mut i32);
 
+/// Returns the version-specific RVA of the native bullet spawn function.
+pub fn bullet_spawn_rva() -> u32 {
+    rva::get().cs_bullet_manager_spawn_bullet
+}
+
 impl CSBulletManager {
     pub fn bullets(&self) -> impl Iterator<Item = &CSBulletIns> {
         let mut current = self.bullets.head;
@@ -134,9 +139,7 @@ impl CSBulletManager {
     pub fn spawn_bullet(&mut self, spawn_data: &BulletSpawnData) -> Result<(), i32> {
         let target = unsafe {
             std::mem::transmute::<u64, FnSpawnBullet>(
-                Program::current()
-                    .rva_to_va(rva::get().cs_bullet_manager_spawn_bullet)
-                    .unwrap(),
+                Program::current().rva_to_va(bullet_spawn_rva()).unwrap(),
             )
         };
 

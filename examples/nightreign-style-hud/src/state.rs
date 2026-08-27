@@ -45,6 +45,224 @@ struct HudSnapshot {
     executor_ultimate_active: bool,
 }
 
+#[derive(Clone, Copy, Default)]
+struct ResurrectionAccumulationSnapshot {
+    active: bool,
+    progress: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WylderHookshotNativeResult {
+    PullEnemy,
+    PullToEnemy,
+    PullToMap,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WylderSkillLockTargetKind {
+    Enemy(FieldInsHandle),
+    Map,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WylderSkillLockTarget {
+    kind: WylderSkillLockTargetKind,
+    screen_pos: [f32; 2],
+    world_pos: HavokPosition,
+    distance: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WylderHookshotMovementDestination {
+    Enemy(FieldInsHandle),
+    Point(HavokPosition),
+}
+
+impl WylderHookshotMovementDestination {
+    fn stop_distance(self) -> f32 {
+        match self {
+            Self::Enemy(_) => WYLDER_HOOKSHOT_STOP_ENEMY_DISTANCE,
+            Self::Point(_) => WYLDER_HOOKSHOT_STOP_MAP_DISTANCE,
+        }
+    }
+}
+
+struct WylderHookshotMovementStopDetector {
+    active: bool,
+    destination: Option<WylderHookshotMovementDestination>,
+    started_at: Option<Instant>,
+    start_position: Option<HavokPosition>,
+    previous_position: Option<HavokPosition>,
+    initial_distance: f32,
+    closest_distance: f32,
+    emitted: bool,
+}
+
+impl Default for WylderHookshotMovementStopDetector {
+    fn default() -> Self {
+        Self {
+            active: false,
+            destination: None,
+            started_at: None,
+            start_position: None,
+            previous_position: None,
+            initial_distance: f32::INFINITY,
+            closest_distance: f32::INFINITY,
+            emitted: false,
+        }
+    }
+}
+
+impl WylderHookshotMovementStopDetector {
+    fn begin(
+        &mut self,
+        destination: Option<WylderHookshotMovementDestination>,
+        player_position: HavokPosition,
+        now: Instant,
+    ) {
+        *self = Self {
+            active: true,
+            destination,
+            started_at: Some(now),
+            start_position: Some(player_position),
+            previous_position: Some(player_position),
+            initial_distance: f32::INFINITY,
+            closest_distance: f32::INFINITY,
+            emitted: false,
+        };
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn set_destination_if_missing(
+        &mut self,
+        destination: Option<WylderHookshotMovementDestination>,
+        player_position: HavokPosition,
+        now: Instant,
+    ) {
+        if self.destination.is_some() || destination.is_none() {
+            return;
+        }
+        self.destination = destination;
+        self.started_at = Some(now);
+        self.start_position = Some(player_position);
+        self.previous_position = Some(player_position);
+        self.initial_distance = f32::INFINITY;
+        self.closest_distance = f32::INFINITY;
+    }
+
+    fn sample(
+        &mut self,
+        player_position: HavokPosition,
+        target_position: Option<HavokPosition>,
+        now: Instant,
+    ) -> bool {
+        if !self.active || self.emitted {
+            return false;
+        }
+        let Some(destination) = self.destination else {
+            return false;
+        };
+        let Some(target_position) = target_position.filter(havok_position_is_finite) else {
+            return false;
+        };
+        if !havok_position_is_finite(&player_position) {
+            return false;
+        }
+
+        let distance = distance_havok(player_position, target_position);
+        if !distance.is_finite() {
+            return false;
+        }
+        if !self.initial_distance.is_finite() {
+            self.initial_distance = distance;
+            self.closest_distance = distance;
+        }
+
+        let travelled = self
+            .start_position
+            .map(|start| distance_havok(start, player_position))
+            .unwrap_or(0.0);
+        let crossed_target_plane = self.previous_position.is_some_and(|previous| {
+            dot_from_target(previous, player_position, target_position) <= 0.0
+        });
+        let approached = self.closest_distance
+            <= self.initial_distance - WYLDER_HOOKSHOT_STOP_MIN_APPROACH_DISTANCE;
+        let rebounded = approached
+            && distance >= self.closest_distance + WYLDER_HOOKSHOT_STOP_REBOUND_DISTANCE;
+
+        self.closest_distance = self.closest_distance.min(distance);
+        self.previous_position = Some(player_position);
+
+        let elapsed = self
+            .started_at
+            .map(|started| now.saturating_duration_since(started).as_secs_f32())
+            .unwrap_or(0.0);
+        let close_enough = distance <= destination.stop_distance();
+        let passed_destination = travelled >= WYLDER_HOOKSHOT_STOP_MIN_TRAVEL_DISTANCE
+            && (crossed_target_plane || rebounded);
+        if elapsed < WYLDER_HOOKSHOT_STOP_GRACE_SECONDS
+            || (!close_enough && !passed_destination)
+        {
+            return false;
+        }
+
+        self.emitted = true;
+        true
+    }
+}
+
+#[derive(Default)]
+struct WylderHookshotNativeResolver {
+    active: bool,
+    pending_map_updates: u8,
+    result: Option<WylderHookshotNativeResult>,
+}
+
+impl WylderHookshotNativeResolver {
+    fn update(
+        &mut self,
+        active: bool,
+        enemy_result: Option<WylderHookshotNativeResult>,
+        native_map_hit: bool,
+    ) -> Option<WylderHookshotNativeResult> {
+        if !active {
+            *self = Self::default();
+            return None;
+        }
+        if !self.active {
+            self.active = true;
+            self.pending_map_updates = 0;
+            self.result = None;
+        }
+        if self.result.is_some() {
+            return None;
+        }
+
+        if let Some(result @ (WylderHookshotNativeResult::PullEnemy
+        | WylderHookshotNativeResult::PullToEnemy)) = enemy_result
+        {
+            self.pending_map_updates = 0;
+            self.result = Some(result);
+            return Some(result);
+        }
+
+        if self.pending_map_updates > 0 {
+            self.pending_map_updates -= 1;
+            if self.pending_map_updates == 0 {
+                self.result = Some(WylderHookshotNativeResult::PullToMap);
+                return self.result;
+            }
+        } else if native_map_hit {
+            // Give the target HKS one game update to publish an enemy result.
+            self.pending_map_updates = 1;
+        }
+        None
+    }
+}
+
 struct ChargeState {
     role: Option<Role>,
     skill_layers: [f32; 2],
@@ -87,6 +305,11 @@ struct ChargeState {
     wylder_skill_lock_has_target: bool,
     wylder_skill_lock_pos: Option<[f32; 2]>,
     wylder_skill_lock_scale: f32,
+    wylder_hookshot_aim_target: Option<WylderSkillLockTarget>,
+    wylder_hookshot_native: WylderHookshotNativeResolver,
+    wylder_hookshot_target: Option<FieldInsHandle>,
+    wylder_hookshot_map_contact: Option<WylderHookshotMapContact>,
+    wylder_hookshot_movement_stop: WylderHookshotMovementStopDetector,
     revenant_skill_move_hud: bool,
     revenant_active_summon: Option<usize>,
     revenant_effect_mask: u8,
@@ -99,9 +322,11 @@ struct ChargeState {
     revenant_known_buddy_handles: Vec<FieldInsHandle>,
     revenant_bind_baseline: Vec<FieldInsHandle>,
     revenant_pending_summon_bind: Option<usize>,
+    revenant_map_refresh_cleanup_pending: bool,
     revenant_converted_souls: HashMap<u32, RevenantConvertedSoul>,
     revenant_debug_souls: Vec<RevenantDebugSoul>,
     revenant_seen_deaths: HashSet<FieldInsHandle>,
+    resurrection_accumulation: ResurrectionAccumulationSnapshot,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -194,6 +419,11 @@ impl ChargeState {
             wylder_skill_lock_has_target: false,
             wylder_skill_lock_pos: None,
             wylder_skill_lock_scale: 1.0,
+            wylder_hookshot_aim_target: None,
+            wylder_hookshot_native: WylderHookshotNativeResolver::default(),
+            wylder_hookshot_target: None,
+            wylder_hookshot_map_contact: None,
+            wylder_hookshot_movement_stop: WylderHookshotMovementStopDetector::default(),
             revenant_skill_move_hud: false,
             revenant_active_summon: None,
             revenant_effect_mask: 0,
@@ -206,18 +436,27 @@ impl ChargeState {
             revenant_known_buddy_handles: Vec::new(),
             revenant_bind_baseline: Vec::new(),
             revenant_pending_summon_bind: None,
+            revenant_map_refresh_cleanup_pending: false,
             revenant_converted_souls: HashMap::new(),
             revenant_debug_souls: Vec::new(),
             revenant_seen_deaths: HashSet::new(),
+            resurrection_accumulation: ResurrectionAccumulationSnapshot::default(),
         }
     }
 
     fn sync(&mut self, now: Instant) -> Option<HudSnapshot> {
         let delta = (now - self.last_update).as_secs_f32().clamp(0.0, 0.25);
         self.last_update = now;
+        self.resurrection_accumulation = ResurrectionAccumulationSnapshot::default();
 
         let world_chr_man = unsafe { WorldChrMan::instance_mut() }.ok()?;
-        let (active_effects, locked_on_enemy, action_pressed) = {
+        self.finish_revenant_map_refresh_cleanup(world_chr_man);
+        let (
+            active_effects,
+            locked_on_enemy,
+            action_pressed,
+            super_armor_progress,
+        ) = {
             let player = world_chr_man.main_player.as_mut()?;
             update_local_damage_module(player);
             let active_effects = player
@@ -227,12 +466,33 @@ impl ChargeState {
                 .map(|entry| entry.param_id)
                 .collect::<Vec<_>>();
             let action_pressed = player.chr_ins.modules.action_request.action_requests.action();
-            (active_effects, player.locked_on_enemy, action_pressed)
+            let super_armor = player.chr_ins.modules.as_ref().super_armor.as_ref();
+            let super_armor_progress = normalized_super_armor(
+                super_armor.sa_durability,
+                super_armor.sa_durability_max,
+            );
+            (
+                active_effects,
+                player.locked_on_enemy,
+                action_pressed,
+                super_armor_progress,
+            )
+        };
+        self.resurrection_accumulation = ResurrectionAccumulationSnapshot {
+            active: active_effects.contains(&SP_RESURRECTION_ACCUMULATION_HUD),
+            progress: super_armor_progress,
         };
 
         let role = active_role_from_effects(&active_effects);
         let damage_hook_events = drain_damage_hook_events();
         self.update_recluse_blood_song(world_chr_man, now, &damage_hook_events);
+        self.update_wylder_hookshot_native_resolution(world_chr_man, &active_effects);
+        self.update_wylder_hookshot_movement_stop(
+            world_chr_man,
+            &active_effects,
+            role == Some(Role::Wylder),
+            now,
+        );
         sync_precision_calibration_outputs(world_chr_man, &active_effects);
         set_revenant_summon_range_hook_active(role == Some(Role::Revenant));
         if role != self.role {
@@ -357,6 +617,8 @@ impl ChargeState {
         self.wylder_skill_lock_has_target = false;
         self.wylder_skill_lock_pos = None;
         self.wylder_skill_lock_scale = 1.0;
+        self.wylder_hookshot_aim_target = None;
+        self.wylder_hookshot_movement_stop.reset();
         self.revenant_skill_move_hud = false;
         self.scholar_targets.clear();
         self.scholar_observing = false;
@@ -379,6 +641,7 @@ impl ChargeState {
         self.revenant_known_buddy_handles.clear();
         self.revenant_bind_baseline.clear();
         self.revenant_pending_summon_bind = None;
+        self.revenant_map_refresh_cleanup_pending = false;
         self.revenant_converted_souls.clear();
         self.revenant_debug_souls.clear();
         self.revenant_seen_deaths.clear();
@@ -386,6 +649,40 @@ impl ChargeState {
 
     fn recluse_blood_debug(&self) -> RecluseBloodDebug {
         self.recluse_blood_debug
+    }
+
+    fn resurrection_accumulation_snapshot(&self) -> ResurrectionAccumulationSnapshot {
+        self.resurrection_accumulation
+    }
+
+    fn begin_map_refresh(&mut self) {
+        self.reset_revenant_presence_for_map_refresh();
+    }
+
+    fn reset_revenant_presence_for_map_refresh(&mut self) {
+        self.revenant_active_summon = None;
+        self.revenant_effect_mask = 0;
+        self.revenant_summon_handles = [None; REVENANT_SUMMON_COUNT];
+        self.revenant_summon_effect_seen = [true; REVENANT_SUMMON_COUNT];
+        self.revenant_summon_restore_timer = [0.0; REVENANT_SUMMON_COUNT];
+        self.revenant_skill_move_hud = false;
+        self.revenant_buddy_count = 0;
+        self.revenant_known_buddy_handles.clear();
+        self.revenant_bind_baseline.clear();
+        self.revenant_pending_summon_bind = None;
+        self.revenant_map_refresh_cleanup_pending = true;
+    }
+
+    fn finish_revenant_map_refresh_cleanup(&mut self, world_chr_man: &mut WorldChrMan) {
+        if !self.revenant_map_refresh_cleanup_pending {
+            return;
+        }
+        let Some(player) = world_chr_man.main_player.as_mut() else {
+            return;
+        };
+
+        remove_revenant_summon_active_effects_from_player(player);
+        self.revenant_map_refresh_cleanup_pending = false;
     }
 
     fn update_revenant_summons(
@@ -408,6 +705,7 @@ impl ChargeState {
             self.revenant_bind_baseline.clear();
             self.revenant_pending_summon_bind = None;
             remove_revenant_summon_death_effects(world_chr_man);
+            remove_revenant_summon_active_effects(world_chr_man);
             return;
         }
 
@@ -557,6 +855,17 @@ impl ChargeState {
             }
         }
         self.sync_revenant_summon_death_effects(world_chr_man);
+        let active_effect_index = self.revenant_active_summon.and_then(|index| {
+            let hp_ratio = self.revenant_summon_handles[index]
+                .and_then(|handle| revenant_buddy_chr_by_handle(world_chr_man, handle))
+                .and_then(revenant_buddy_hp_ratio);
+            revenant_active_effect_index(
+                Some(index),
+                self.revenant_pending_summon_bind,
+                hp_ratio,
+            )
+        });
+        sync_revenant_summon_active_effects(world_chr_man, active_effect_index);
         if self.revenant_pending_summon_bind.is_none() {
             self.revenant_known_buddy_handles = current_buddy_handles;
         }
@@ -1082,13 +1391,191 @@ impl ChargeState {
             && active_effects.contains(&role_config(Role::Wylder).effect(SP_WYLDER_SKILL_LOCK));
         let target = self
             .wylder_skill_lock_active
-            .then(|| wylder_skill_lock_target_pos(world_chr_man))
+            .then(|| wylder_skill_lock_target(world_chr_man))
             .flatten();
-        self.wylder_skill_lock_pos = target.map(|(pos, _)| pos);
+        self.wylder_skill_lock_pos = target.map(|target| target.screen_pos);
         self.wylder_skill_lock_scale = target
-            .map(|(_, distance)| wylder_skill_lock_distance_scale(distance))
+            .map(|target| wylder_skill_lock_distance_scale(target.distance))
             .unwrap_or(1.0);
         self.wylder_skill_lock_has_target = self.wylder_skill_lock_pos.is_some();
+        if self.wylder_skill_lock_active {
+            self.wylder_hookshot_aim_target = target;
+        }
+    }
+
+    fn update_wylder_hookshot_native_resolution(
+        &mut self,
+        world_chr_man: &mut WorldChrMan,
+        active_effects: &[i32],
+    ) {
+        let active = active_effects.contains(&SP_WYLDER_HOOKSHOT_RESOLVE_ACTIVE);
+        set_wylder_hookshot_map_probe_visible(active);
+        set_wylder_hookshot_player_chr(
+            world_chr_man
+                .main_player
+                .as_ref()
+                .map(|player| &player.chr_ins),
+        );
+        let started = active && !self.wylder_hookshot_native.active;
+        if started {
+            self.wylder_hookshot_target = None;
+            self.wylder_hookshot_map_contact = None;
+            clear_wylder_hookshot_map_contact();
+            clear_wylder_hookshot_player_outputs(world_chr_man);
+        }
+        if !active {
+            clear_wylder_hookshot_map_contact();
+            self.wylder_hookshot_native.update(false, None, false);
+            clear_wylder_hookshot_player_outputs(world_chr_man);
+            return;
+        }
+
+        let native_map_contact = take_wylder_hookshot_map_contact();
+        let hks_map_pulse = active_effects.contains(&SP_WYLDER_HOOKSHOT_MAP_BOUND_PULSE);
+        let native_map_hit = native_map_contact.is_some() || hks_map_pulse;
+        if let Some(contact) = native_map_contact {
+            self.wylder_hookshot_map_contact = Some(contact);
+        }
+        let enemy = active
+            .then(|| wylder_hookshot_target_result(world_chr_man))
+            .flatten();
+        let emitted = self.wylder_hookshot_native.update(
+            active,
+            enemy.map(|(_, result)| result),
+            native_map_hit,
+        );
+
+        if hks_map_pulse {
+            if let Some(player) = world_chr_man.main_player.as_mut() {
+                player
+                    .chr_ins
+                    .remove_speffect(SP_WYLDER_HOOKSHOT_MAP_BOUND_PULSE);
+            }
+        }
+
+        if let Some((handle, _)) = enemy {
+            self.wylder_hookshot_target = Some(handle);
+            self.wylder_hookshot_map_contact = None;
+            if let Some(target) = world_chr_man.chr_ins_by_handle_mut(&handle) {
+                target.remove_speffect(SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED);
+                target.remove_speffect(SP_WYLDER_HOOKSHOT_IMPACT_REJECTED);
+            }
+        }
+
+        let Some(result) = emitted else {
+            return;
+        };
+        clear_wylder_hookshot_player_outputs(world_chr_man);
+        let Some(player) = world_chr_man.main_player.as_mut() else {
+            return;
+        };
+        let output = match result {
+            WylderHookshotNativeResult::PullEnemy => SP_WYLDER_HOOKSHOT_PULL_ENEMY,
+            WylderHookshotNativeResult::PullToEnemy => SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY,
+            WylderHookshotNativeResult::PullToMap => SP_WYLDER_HOOKSHOT_PULL_TO_MAP,
+        };
+        player.apply_speffect(output, true);
+    }
+
+    fn update_wylder_hookshot_movement_stop(
+        &mut self,
+        world_chr_man: &mut WorldChrMan,
+        active_effects: &[i32],
+        wylder_active: bool,
+        now: Instant,
+    ) {
+        let active = wylder_active
+            && active_effects.contains(&SP_WYLDER_HOOKSHOT_MOVEMENT_ACTIVE);
+        if !active {
+            let was_active = self.wylder_hookshot_movement_stop.active;
+            self.wylder_hookshot_movement_stop.reset();
+            if let Some(player) = world_chr_man.main_player.as_mut() {
+                player
+                    .chr_ins
+                    .remove_speffect(SP_WYLDER_HOOKSHOT_MOVEMENT_STOP);
+            }
+            if was_active {
+                self.wylder_hookshot_target = None;
+                self.wylder_hookshot_map_contact = None;
+                self.wylder_hookshot_aim_target = None;
+            }
+            return;
+        }
+
+        let Some(player_position) = world_chr_man
+            .main_player
+            .as_ref()
+            .map(|player| scholar_chr_physics_position(&player.chr_ins))
+        else {
+            self.wylder_hookshot_movement_stop.reset();
+            return;
+        };
+        let candidate = self.wylder_hookshot_movement_destination(active_effects);
+        if !self.wylder_hookshot_movement_stop.active {
+            self.wylder_hookshot_movement_stop
+                .begin(candidate, player_position, now);
+            if let Some(player) = world_chr_man.main_player.as_mut() {
+                player
+                    .chr_ins
+                    .remove_speffect(SP_WYLDER_HOOKSHOT_MOVEMENT_STOP);
+            }
+        } else {
+            self.wylder_hookshot_movement_stop.set_destination_if_missing(
+                candidate,
+                player_position,
+                now,
+            );
+        }
+
+        let target_position = self
+            .wylder_hookshot_movement_stop
+            .destination
+            .and_then(|destination| {
+                wylder_hookshot_destination_position(world_chr_man, destination)
+            });
+        if !self
+            .wylder_hookshot_movement_stop
+            .sample(player_position, target_position, now)
+        {
+            return;
+        }
+        if let Some(player) = world_chr_man.main_player.as_mut() {
+            player.apply_speffect(SP_WYLDER_HOOKSHOT_MOVEMENT_STOP, true);
+        }
+    }
+
+    fn wylder_hookshot_movement_destination(
+        &self,
+        active_effects: &[i32],
+    ) -> Option<WylderHookshotMovementDestination> {
+        let aimed_enemy = self.wylder_hookshot_aim_target.and_then(|target| {
+            if let WylderSkillLockTargetKind::Enemy(handle) = target.kind {
+                Some(WylderHookshotMovementDestination::Enemy(handle))
+            } else {
+                None
+            }
+        });
+        let aimed_map = self.wylder_hookshot_aim_target.and_then(|target| {
+            (target.kind == WylderSkillLockTargetKind::Map)
+                .then_some(WylderHookshotMovementDestination::Point(target.world_pos))
+        });
+        let resolved_enemy = self
+            .wylder_hookshot_target
+            .map(WylderHookshotMovementDestination::Enemy);
+        let resolved_map = self.wylder_hookshot_map_contact.map(|contact| {
+            WylderHookshotMovementDestination::Point(contact.position)
+        });
+
+        if active_effects.contains(&SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY) {
+            return resolved_enemy.or(aimed_enemy);
+        }
+        if active_effects.contains(&SP_WYLDER_HOOKSHOT_PULL_TO_MAP) {
+            return resolved_map.or(aimed_map);
+        }
+        resolved_enemy
+            .or(resolved_map)
+            .or(aimed_enemy)
+            .or(aimed_map)
     }
 
     fn update_ironeye_weakness(
@@ -1205,9 +1692,11 @@ impl ChargeState {
         if self.ironeye_weakness_marks.remove(&handle).is_none() {
             return;
         }
-        let burst_pos = world_chr_man
-            .chr_ins_by_handle(&handle)
-            .and_then(scholar_target_screen_pos);
+        let burst_pos = world_chr_man.main_player.as_ref().and_then(|player| {
+            world_chr_man
+                .chr_ins_by_handle(&handle)
+                .and_then(|target| ironeye_weakness_marker_screen_pos(player, target))
+        });
         if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
             enemy.remove_speffect(config.effect(SP_IRONEYE_WEAKNESS_ACTIVE));
             enemy.apply_speffect(config.effect(SP_IRONEYE_WEAKNESS_BREAK), true);
@@ -2260,23 +2749,25 @@ impl ChargeState {
             }
         }
         if config.role == Role::Ironeye {
-            for (slot, (handle, mark)) in ironeye_weakness_marks
-                .iter_mut()
-                .zip(self.ironeye_weakness_marks.iter())
-            {
-                let Some(pos) = world_chr_man
-                    .chr_ins_by_handle(handle)
-                    .and_then(scholar_target_screen_pos)
-                else {
-                    continue;
-                };
-                *slot = IroneyeWeaknessSnapshot {
-                    active: true,
-                    pos,
-                    progress: (mark.accumulated_damage as f32 / mark.threshold_damage as f32)
-                        .clamp(0.0, 1.0),
-                    remaining: (mark.expires_at - now).as_secs_f32().max(0.0),
-                };
+            if let Some(player) = world_chr_man.main_player.as_ref() {
+                for (slot, (handle, mark)) in ironeye_weakness_marks
+                    .iter_mut()
+                    .zip(self.ironeye_weakness_marks.iter())
+                {
+                    let Some(pos) = world_chr_man
+                        .chr_ins_by_handle(handle)
+                        .and_then(|target| ironeye_weakness_marker_screen_pos(player, target))
+                    else {
+                        continue;
+                    };
+                    *slot = IroneyeWeaknessSnapshot {
+                        active: true,
+                        pos,
+                        progress: (mark.accumulated_damage as f32 / mark.threshold_damage as f32)
+                            .clamp(0.0, 1.0),
+                        remaining: (mark.expires_at - now).as_secs_f32().max(0.0),
+                    };
+                }
             }
             for (slot, burst) in ironeye_weakness_bursts
                 .iter_mut()
@@ -2455,7 +2946,7 @@ impl ChargeState {
     }
 }
 
-fn wylder_skill_lock_target_pos(world_chr_man: &WorldChrMan) -> Option<([f32; 2], f32)> {
+fn wylder_skill_lock_target(world_chr_man: &WorldChrMan) -> Option<WylderSkillLockTarget> {
     let Some(player) = world_chr_man.main_player.as_ref() else {
         return None;
     };
@@ -2512,10 +3003,10 @@ fn precision_calibration_has_enemy_target(world_chr_man: &WorldChrMan) -> bool {
 fn wylder_skill_lock_enemy_target_pos(
     world_chr_man: &WorldChrMan,
     player: &PlayerIns,
-) -> Option<([f32; 2], f32)> {
+) -> Option<WylderSkillLockTarget> {
     let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
     let mut scanned = 0usize;
-    let mut best: Option<([f32; 2], f32, f32)> = None;
+    let mut best: Option<(WylderSkillLockTarget, f32)> = None;
     for entry in world_chr_man.chr_inses_by_distance.iter() {
         if scanned >= WYLDER_SKILL_LOCK_MAX_DISTANCE_ENTRIES {
             break;
@@ -2542,16 +3033,24 @@ fn wylder_skill_lock_enemy_target_pos(
         }
         let score = wylder_skill_lock_screen_pos_score(screen_pos).unwrap_or(f32::MAX);
         if match best {
-            Some((_, best_score, _)) => score < best_score,
+            Some((_, best_score)) => score < best_score,
             None => true,
         } {
-            best = Some((screen_pos, score, target_distance));
+            best = Some((
+                WylderSkillLockTarget {
+                    kind: WylderSkillLockTargetKind::Enemy(chr.field_ins_handle),
+                    screen_pos,
+                    world_pos: target_pos,
+                    distance: target_distance,
+                },
+                score,
+            ));
         }
     }
-    best.map(|(pos, _, distance)| (pos, distance))
+    best.map(|(target, _)| target)
 }
 
-fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<([f32; 2], f32)> {
+fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<WylderSkillLockTarget> {
     let Ok(camera) = (unsafe { CSCamera::instance() }) else {
         return None;
     };
@@ -2578,7 +3077,7 @@ fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<([f32; 2], f3
         forward.1 / len * distance,
         forward.2 / len * distance,
     );
-    let mut best: Option<([f32; 2], f32)> = None;
+    let mut best: Option<WylderSkillLockTarget> = None;
     for filter in WYLDER_SKILL_LOCK_WALL_FILTERS {
         let Some(hit) = havok
             .phys_world
@@ -2599,10 +3098,15 @@ fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<([f32; 2], f3
         {
             let screen_pos = hit_screen_pos.unwrap();
             if match best {
-                Some((_, best_distance)) => hit_distance < best_distance,
+                Some(best) => hit_distance < best.distance,
                 None => true,
             } {
-                best = Some((screen_pos, hit_distance));
+                best = Some(WylderSkillLockTarget {
+                    kind: WylderSkillLockTargetKind::Map,
+                    screen_pos,
+                    world_pos: hit,
+                    distance: hit_distance,
+                });
             }
         }
     }
@@ -3371,6 +3875,18 @@ fn revenant_buddy_hp_ratio_by_handle(
     })
 }
 
+fn revenant_active_effect_index(
+    active_index: Option<usize>,
+    pending_index: Option<usize>,
+    hp_ratio: Option<f32>,
+) -> Option<usize> {
+    let index = active_index.filter(|index| *index < REVENANT_SUMMON_COUNT)?;
+    if pending_index == Some(index) || hp_ratio? <= 0.0 {
+        return None;
+    }
+    Some(index)
+}
+
 fn revenant_buddy_hp_ratio_from_fe(handle: FieldInsHandle) -> Option<f32> {
     if handle.is_empty() {
         return None;
@@ -3402,6 +3918,13 @@ fn hp_ratio_from_u32(hp: u32, max_hp: u32) -> Option<f32> {
         return None;
     }
     Some((hp as f32 / max_hp as f32).clamp(0.0, 1.0))
+}
+
+fn normalized_super_armor(current: f32, maximum: f32) -> f32 {
+    if !current.is_finite() || !maximum.is_finite() || maximum <= 0.0 {
+        return 0.0;
+    }
+    (current / maximum).clamp(0.0, 1.0)
 }
 
 fn revenant_buddy_hp_ratio(chr: &ChrIns) -> Option<f32> {
@@ -3539,6 +4062,49 @@ fn chr_has_speffect(chr: &ChrIns, sp_effect: i32) -> bool {
     chr.special_effect
         .entries()
         .any(|entry| entry.param_id == sp_effect)
+}
+
+fn wylder_hookshot_target_result(
+    world_chr_man: &WorldChrMan,
+) -> Option<(FieldInsHandle, WylderHookshotNativeResult)> {
+    for entry in world_chr_man.chr_inses_by_distance.iter() {
+        let chr = unsafe { entry.chr_ins.as_ref() };
+        let result = if chr_has_speffect(chr, SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED) {
+            WylderHookshotNativeResult::PullEnemy
+        } else if chr_has_speffect(chr, SP_WYLDER_HOOKSHOT_IMPACT_REJECTED) {
+            WylderHookshotNativeResult::PullToEnemy
+        } else {
+            continue;
+        };
+        return Some((chr.field_ins_handle, result));
+    }
+    None
+}
+
+fn wylder_hookshot_destination_position(
+    world_chr_man: &WorldChrMan,
+    destination: WylderHookshotMovementDestination,
+) -> Option<HavokPosition> {
+    match destination {
+        WylderHookshotMovementDestination::Enemy(handle) => world_chr_man
+            .chr_ins_by_handle(&handle)
+            .map(scholar_chr_physics_position),
+        WylderHookshotMovementDestination::Point(position) => Some(position),
+    }
+}
+
+fn clear_wylder_hookshot_player_outputs(world_chr_man: &mut WorldChrMan) {
+    let Some(player) = world_chr_man.main_player.as_mut() else {
+        return;
+    };
+    for output in [
+        SP_WYLDER_HOOKSHOT_PULL_ENEMY,
+        SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY,
+        SP_WYLDER_HOOKSHOT_PULL_TO_MAP,
+        SP_WYLDER_HOOKSHOT_MAP_BOUND_PULSE,
+    ] {
+        player.chr_ins.remove_speffect(output);
+    }
 }
 
 fn chr_data_hp(chr: &ChrIns) -> i32 {
@@ -3888,6 +4454,30 @@ fn remove_revenant_summon_death_effects_from_player(player: &mut eldenring::cs::
     }
 }
 
+fn sync_revenant_summon_active_effects(
+    world_chr_man: &mut WorldChrMan,
+    active_index: Option<usize>,
+) {
+    let Some(player) = world_chr_man.main_player.as_mut() else {
+        return;
+    };
+    for (index, effect) in REVENANT_SUMMON_ACTIVE_EFFECTS.into_iter().enumerate() {
+        set_effect(player, effect, active_index == Some(index));
+    }
+}
+
+fn remove_revenant_summon_active_effects(world_chr_man: &mut WorldChrMan) {
+    if let Some(player) = world_chr_man.main_player.as_mut() {
+        remove_revenant_summon_active_effects_from_player(player);
+    }
+}
+
+fn remove_revenant_summon_active_effects_from_player(player: &mut eldenring::cs::PlayerIns) {
+    for effect in REVENANT_SUMMON_ACTIVE_EFFECTS {
+        player.chr_ins.remove_speffect(effect);
+    }
+}
+
 fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
     for offset in [
         SP_SKILL_READY_1,
@@ -3903,6 +4493,9 @@ fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfi
         clear_recluse_outputs(player, config);
     } else if config.role == Role::Scholar {
         clear_scholar_self_outputs(player, config);
+    } else if config.role == Role::Revenant {
+        remove_revenant_summon_death_effects_from_player(player);
+        remove_revenant_summon_active_effects_from_player(player);
     }
 }
 
@@ -3951,6 +4544,231 @@ fn clear_scholar_enemy_outputs(enemy: &mut eldenring::cs::ChrIns, config: &RoleC
 fn remove_all_role_outputs(player: &mut eldenring::cs::PlayerIns) {
     for config in ROLE_CONFIGS.iter() {
         remove_role_outputs(player, config);
+    }
+}
+
+#[cfg(test)]
+mod revenant_active_effect_tests {
+    use super::{
+        ChargeState, REVENANT_SUMMON_COUNT, WylderHookshotNativeResolver,
+        WylderHookshotNativeResult, normalized_super_armor, revenant_active_effect_index,
+    };
+    use eldenring::cs::FieldInsHandle;
+    use std::time::Instant;
+
+    #[test]
+    fn bound_living_family_selects_its_output() {
+        assert_eq!(revenant_active_effect_index(Some(0), None, Some(1.0)), Some(0));
+        assert_eq!(revenant_active_effect_index(Some(1), None, Some(0.5)), Some(1));
+        assert_eq!(revenant_active_effect_index(Some(2), None, Some(0.01)), Some(2));
+    }
+
+    #[test]
+    fn pending_missing_dead_or_invalid_family_has_no_output() {
+        assert_eq!(revenant_active_effect_index(Some(0), Some(0), Some(1.0)), None);
+        assert_eq!(revenant_active_effect_index(Some(0), None, None), None);
+        assert_eq!(revenant_active_effect_index(Some(0), None, Some(0.0)), None);
+        assert_eq!(revenant_active_effect_index(None, None, Some(1.0)), None);
+        assert_eq!(revenant_active_effect_index(Some(3), None, Some(1.0)), None);
+    }
+
+    #[test]
+    fn map_refresh_clears_presence_but_preserves_family_progress() {
+        let mut state = ChargeState::new(Instant::now());
+        state.revenant_active_summon = Some(1);
+        state.revenant_effect_mask = 0b010;
+        state.revenant_summon_hp = [0.25, 0.5, 0.75];
+        state.revenant_summon_handles = [Some(FieldInsHandle::none()); REVENANT_SUMMON_COUNT];
+        state.revenant_summon_effect_seen = [false; REVENANT_SUMMON_COUNT];
+        state.revenant_summon_death_locked = [true, false, true];
+        state.revenant_summon_restore_timer = [1.0, 2.0, 3.0];
+        state.revenant_buddy_count = 1;
+        state.revenant_known_buddy_handles = vec![FieldInsHandle::none()];
+        state.revenant_bind_baseline = vec![FieldInsHandle::none()];
+        state.revenant_pending_summon_bind = Some(1);
+
+        state.reset_revenant_presence_for_map_refresh();
+
+        assert_eq!(state.revenant_active_summon, None);
+        assert_eq!(state.revenant_effect_mask, 0);
+        assert_eq!(state.revenant_summon_handles, [None; REVENANT_SUMMON_COUNT]);
+        assert_eq!(state.revenant_summon_effect_seen, [true; REVENANT_SUMMON_COUNT]);
+        assert_eq!(state.revenant_summon_restore_timer, [0.0; REVENANT_SUMMON_COUNT]);
+        assert_eq!(state.revenant_buddy_count, 0);
+        assert!(state.revenant_known_buddy_handles.is_empty());
+        assert!(state.revenant_bind_baseline.is_empty());
+        assert_eq!(state.revenant_pending_summon_bind, None);
+        assert!(state.revenant_map_refresh_cleanup_pending);
+        assert_eq!(state.revenant_summon_hp, [0.25, 0.5, 0.75]);
+        assert_eq!(state.revenant_summon_death_locked, [true, false, true]);
+    }
+
+    #[test]
+    fn super_armor_ratio_is_clamped_and_sanitized() {
+        assert_eq!(normalized_super_armor(100.0, 100.0), 1.0);
+        assert_eq!(normalized_super_armor(50.0, 100.0), 0.5);
+        assert_eq!(normalized_super_armor(150.0, 100.0), 1.0);
+        assert_eq!(normalized_super_armor(-10.0, 100.0), 0.0);
+        assert_eq!(normalized_super_armor(10.0, 0.0), 0.0);
+        assert_eq!(normalized_super_armor(f32::NAN, 100.0), 0.0);
+        assert_eq!(normalized_super_armor(10.0, f32::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn hookshot_enemy_result_preempts_pending_map_contact() {
+        let mut resolver = WylderHookshotNativeResolver::default();
+        assert_eq!(resolver.update(true, None, true), None);
+        assert_eq!(
+            resolver.update(
+                true,
+                Some(WylderHookshotNativeResult::PullToEnemy),
+                false,
+            ),
+            Some(WylderHookshotNativeResult::PullToEnemy)
+        );
+        assert_eq!(resolver.update(true, None, false), None);
+    }
+
+    #[test]
+    fn hookshot_map_contact_is_deferred_one_update() {
+        let mut resolver = WylderHookshotNativeResolver::default();
+        assert_eq!(resolver.update(true, None, true), None);
+        assert_eq!(
+            resolver.update(true, None, false),
+            Some(WylderHookshotNativeResult::PullToMap)
+        );
+    }
+
+    #[test]
+    fn hookshot_inactive_edge_resets_the_previous_result() {
+        let mut resolver = WylderHookshotNativeResolver::default();
+        assert_eq!(
+            resolver.update(
+                true,
+                Some(WylderHookshotNativeResult::PullEnemy),
+                false,
+            ),
+            Some(WylderHookshotNativeResult::PullEnemy)
+        );
+        assert_eq!(resolver.update(false, None, false), None);
+        assert_eq!(resolver.update(true, None, true), None);
+        assert_eq!(
+            resolver.update(true, None, false),
+            Some(WylderHookshotNativeResult::PullToMap)
+        );
+    }
+}
+
+#[cfg(test)]
+mod wylder_hookshot_movement_stop_tests {
+    use super::{
+        HavokPosition, WylderHookshotMovementDestination,
+        WylderHookshotMovementStopDetector,
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn close_destination_waits_for_the_startup_grace_period() {
+        let now = Instant::now();
+        let target = HavokPosition::from_xyz(10.0, 0.0, 0.0);
+        let mut detector = WylderHookshotMovementStopDetector::default();
+        detector.begin(
+            Some(WylderHookshotMovementDestination::Point(target)),
+            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            now,
+        );
+
+        assert!(!detector.sample(
+            HavokPosition::from_xyz(9.2, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(40),
+        ));
+        assert!(detector.sample(
+            HavokPosition::from_xyz(9.2, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(100),
+        ));
+    }
+
+    #[test]
+    fn crossing_the_target_plane_stops_even_after_a_large_frame_step() {
+        let now = Instant::now();
+        let target = HavokPosition::from_xyz(10.0, 0.0, 0.0);
+        let mut detector = WylderHookshotMovementStopDetector::default();
+        detector.begin(
+            Some(WylderHookshotMovementDestination::Point(target)),
+            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            now,
+        );
+
+        assert!(!detector.sample(
+            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            Some(target),
+            now,
+        ));
+        assert!(!detector.sample(
+            HavokPosition::from_xyz(8.0, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(100),
+        ));
+        assert!(detector.sample(
+            HavokPosition::from_xyz(11.5, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(120),
+        ));
+    }
+
+    #[test]
+    fn moving_away_after_the_closest_point_stops_the_pull() {
+        let now = Instant::now();
+        let target = HavokPosition::from_xyz(10.0, 0.0, 0.0);
+        let mut detector = WylderHookshotMovementStopDetector::default();
+        detector.begin(
+            Some(WylderHookshotMovementDestination::Point(target)),
+            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            now,
+        );
+
+        assert!(!detector.sample(
+            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            Some(target),
+            now,
+        ));
+        assert!(!detector.sample(
+            HavokPosition::from_xyz(8.0, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(100),
+        ));
+        assert!(detector.sample(
+            HavokPosition::from_xyz(7.7, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(120),
+        ));
+    }
+
+    #[test]
+    fn stop_request_is_emitted_only_once_per_activation() {
+        let now = Instant::now();
+        let target = HavokPosition::from_xyz(2.0, 0.0, 0.0);
+        let mut detector = WylderHookshotMovementStopDetector::default();
+        detector.begin(
+            Some(WylderHookshotMovementDestination::Enemy(
+                eldenring::cs::FieldInsHandle::none(),
+            )),
+            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            now,
+        );
+
+        assert!(detector.sample(
+            HavokPosition::from_xyz(0.6, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(100),
+        ));
+        assert!(!detector.sample(
+            HavokPosition::from_xyz(0.8, 0.0, 0.0),
+            Some(target),
+            now + Duration::from_millis(120),
+        ));
     }
 }
 

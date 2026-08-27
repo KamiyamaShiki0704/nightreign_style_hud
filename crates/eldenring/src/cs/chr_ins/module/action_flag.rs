@@ -17,7 +17,7 @@ pub struct CSChrActionFlagModule {
     /// Guard level from the params of the equipped weapon.
     pub guard_level: u32,
     unk24: [u8; 0x10],
-    /// Param ID of the last received attack.
+    /// Damage-type code of the last received attack (for example, map bound is 1017).
     pub received_damage_type: u32,
     unk38: [u8; 0x8],
     pub action_modifiers_flags: ChrActionModifiersFlags,

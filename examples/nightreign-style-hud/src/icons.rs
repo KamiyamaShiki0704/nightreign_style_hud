@@ -116,6 +116,7 @@ struct IconSet {
     scholar: ScholarIconSet,
     wylder_skill_lock: Option<TextureId>,
     multi_locking: Option<TextureId>,
+    resurrection_accumulation: Option<TextureId>,
 }
 
 impl Default for IconSet {
@@ -130,6 +131,7 @@ impl Default for IconSet {
             scholar: ScholarIconSet::default(),
             wylder_skill_lock: None,
             multi_locking: None,
+            resurrection_accumulation: None,
         }
     }
 }
@@ -176,6 +178,14 @@ impl IconSet {
         self.multi_locking = load_raw_texture(
             render_context,
             include_bytes!("../assets/MultipleLocking.png"),
+        );
+        self.resurrection_accumulation = load_horizontal_atlas_256(
+            render_context,
+            &[
+                include_bytes!("../assets/ResurrectionAccumulation_1.png").as_slice(),
+                include_bytes!("../assets/ResurrectionAccumulation_2.png").as_slice(),
+            ],
+            "Resurrection accumulation atlas",
         );
     }
 
@@ -507,6 +517,28 @@ fn apply_circle_alpha_mask(rgba: &mut [u8], width: u32, height: u32) {
                 let fade = ((radius - dist) / feather).clamp(0.0, 1.0);
                 rgba[idx] = (rgba[idx] as f32 * fade) as u8;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod resurrection_accumulation_asset_tests {
+    use super::*;
+
+    #[test]
+    fn embedded_assets_are_valid_256_pixel_rgba_images() {
+        for bytes in [
+            include_bytes!("../assets/ResurrectionAccumulation_1.png").as_slice(),
+            include_bytes!("../assets/ResurrectionAccumulation_2.png").as_slice(),
+        ] {
+            let image = ImageReader::new(Cursor::new(bytes))
+                .with_guessed_format()
+                .expect("resurrection asset format should be readable")
+                .decode()
+                .expect("resurrection asset should decode")
+                .into_rgba8();
+            assert_eq!(image.dimensions(), (256, 256));
+            assert!(image.pixels().any(|pixel| pixel[3] > 0));
         }
     }
 }

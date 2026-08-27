@@ -167,7 +167,7 @@ fn draw_recluse_skill_ui(
             draw_centered_texture_region(
                 ui,
                 pos,
-                radius * 3.68,
+                radius * 3.68 * RECLUSE_LOCK_MARK_SCALE,
                 region,
                 ImColor32::from_rgba(255, 255, 255, 245),
             );
@@ -213,6 +213,50 @@ fn draw_recluse_lock_debug_points(ui: &Ui, points: LockDebugPoints) {
     }
 }
 
+fn draw_resurrection_accumulation_ui(
+    ui: &Ui,
+    snapshot: ResurrectionAccumulationSnapshot,
+    texture_id: Option<TextureId>,
+    scale: f32,
+) {
+    if !snapshot.active {
+        return;
+    }
+    let Some(texture_id) = texture_id else {
+        return;
+    };
+
+    let viewport = ui.io().display_size;
+    let center = [
+        snap_px(viewport[0] * 0.5),
+        snap_px(viewport[1] * RESURRECTION_ACCUMULATION_CENTER_Y_FACTOR),
+    ];
+    let half = RESURRECTION_ACCUMULATION_HALF_SIZE * scale;
+    let (base_uv_min, base_uv_max) = atlas_uv(0, RESURRECTION_ACCUMULATION_ATLAS_SLOTS);
+    let (fill_uv_min, fill_uv_max) = atlas_uv(1, RESURRECTION_ACCUMULATION_ATLAS_SLOTS);
+    let color = ImColor32::from_rgba(255, 255, 255, 255);
+
+    draw_centered_atlas_texture(
+        ui,
+        center,
+        half,
+        texture_id,
+        base_uv_min,
+        base_uv_max,
+        color,
+    );
+    draw_textured_progress_sector_atlas(
+        ui,
+        center,
+        half,
+        texture_id,
+        fill_uv_min,
+        fill_uv_max,
+        snapshot.progress,
+        color,
+    );
+}
+
 fn hud_alpha(alpha: u8, solid: bool) -> u8 {
     if solid {
         alpha
@@ -250,6 +294,96 @@ fn draw_recluse_blood_debug(debug: RecluseBloodDebug, scale: f32) {
         ImColor32::from_rgba(220, 235, 255, 235),
         &line,
     );
+}
+
+fn draw_wylder_hookshot_map_probe_debug(scale: f32) {
+    let probe = wylder_hookshot_map_probe_snapshot();
+    if !probe.visible {
+        return;
+    }
+
+    let hook_status = match probe.hook_status {
+        1 => "searching",
+        2 => "installed",
+        3 => "pattern-missing",
+        4 => "hook-failed",
+        _ => "not-started",
+    };
+    let last_kind = if probe.last_kind == u32::MAX {
+        "-".to_string()
+    } else {
+        probe.last_kind.to_string()
+    };
+    let line1 = format!(
+        "[DEBUG-wylder-map-a41c] hook:{hook_status} calls:{} valid:{} last-kind:{last_kind} kind3:{}",
+        probe.calls, probe.valid_inputs, probe.kind3_calls,
+    );
+    let line2 = format!(
+        "owner-match:{} sp-match:{} finite:{} captured:{} bullet:{}/{}/{} owner:{:X} player:{:X}",
+        probe.owner_matches,
+        probe.effect_matches,
+        probe.finite_contacts,
+        probe.captures,
+        probe.bullet_receipt_seen,
+        probe.bullet_owner_matches,
+        probe.bullet_captures,
+        probe.last_owner,
+        probe.expected_player,
+    );
+    let lookup_status = match probe.atk_lookup_hook_status {
+        1 => "searching",
+        2 => "installed",
+        3 => "pattern-missing",
+        4 => "hook-failed",
+        _ => "not-started",
+    };
+    let lookup_table = match probe.atk_lookup_table {
+        0 => "NPC(0)",
+        1 => "PC(1)",
+        _ => "-",
+    };
+    let line3 = format!(
+        "atk498210 hook:{lookup_status} lookups:{} table:{lookup_table} direct-rva:{:X} s30:{:X} s70:{:X}",
+        probe.atk_lookup_calls,
+        probe.atk_lookup_direct_return_rva,
+        probe.atk_lookup_stack_30_rva,
+        probe.atk_lookup_stack_70_rva,
+    );
+    let impact_status = match probe.impact_hook_status {
+        1 => "searching",
+        2 => "installed",
+        3 => "pattern-missing",
+        4 => "hook-failed",
+        _ => "not-started",
+    };
+    let line4 = format!(
+        "impact hook:{impact_status} calls:{} atk:{} b6f5:{} aff7:{} e302:{} other:{} last:{:X}",
+        probe.impact_calls,
+        probe.impact_matches,
+        probe.impact_caller_38b6f5,
+        probe.impact_caller_44aff7,
+        probe.impact_caller_6de302,
+        probe.impact_caller_other,
+        probe.impact_last_caller_rva,
+    );
+    let line5 = format!(
+        "impact finite:{} pos:{:.2},{:.2},{:.2} ctx:{:X}",
+        probe.impact_finite_positions,
+        probe.impact_position[0],
+        probe.impact_position[1],
+        probe.impact_position[2],
+        probe.impact_last_context,
+    );
+    let debug_scale = scale.max(0.85);
+    let font_size = 17.0 * debug_scale;
+    for (index, line) in [line1, line2, line3, line4, line5].iter().enumerate() {
+        draw_sized_text(
+            [24.0 * debug_scale, (126.0 + index as f32 * 22.0) * debug_scale],
+            font_size,
+            ImColor32::from_rgba(225, 240, 255, 240),
+            line,
+        );
+    }
 }
 
 fn draw_revenant_static_summon_ui(
@@ -619,6 +753,7 @@ fn draw_ironeye_weakness_marks(
     icons: &IroneyeIconSet,
     now: Instant,
     animation_start: Instant,
+    scale: f32,
 ) {
     for mark in snapshot.ironeye_weakness_marks {
         if !mark.active {
@@ -638,7 +773,8 @@ fn draw_ironeye_weakness_marks(
                 color = ImColor32::from_rgba(255, 246, 228, alpha);
             }
         }
-        let half = lerp(28.0, 36.0, progress) * IRONEYE_WEAKNESS_MARK_SCALE;
+        let half = scale_legacy_4k_pixels(lerp(28.0, 36.0, progress), scale)
+            * IRONEYE_WEAKNESS_MARK_SCALE;
         if let Some(texture_id) = icons.atlas {
             for slot in IRONEYE_WEAKNESS_ATLAS_SLOTS {
                 let (uv_min, uv_max) = atlas_uv(slot, IRONEYE_ATLAS_SLOTS);
@@ -648,7 +784,7 @@ fn draw_ironeye_weakness_marks(
             let draw = ui.get_foreground_draw_list();
             draw.add_circle(mark.pos, half * 0.66, color)
                 .num_segments(32)
-                .thickness(3.0)
+                .thickness(scale_legacy_4k_pixels(3.0, scale))
                 .build();
         }
     }
@@ -665,11 +801,13 @@ fn draw_ironeye_weakness_marks(
         if alpha == 0 {
             continue;
         }
-        let half = lerp(36.0, 44.0, spread_t) * IRONEYE_WEAKNESS_MARK_SCALE;
+        let half = scale_legacy_4k_pixels(lerp(36.0, 44.0, spread_t), scale)
+            * IRONEYE_WEAKNESS_MARK_SCALE;
         let color = ImColor32::from_rgba(255, 244, 230, alpha);
         if let Some(texture_id) = icons.atlas {
             let directions = [[-0.72, -0.54], [0.72, -0.54], [0.72, 0.54], [-0.72, 0.54]];
-            let spread = lerp(0.0, 28.0, spread_t.powf(0.72)) * IRONEYE_WEAKNESS_MARK_SCALE;
+            let spread = scale_legacy_4k_pixels(lerp(0.0, 28.0, spread_t.powf(0.72)), scale)
+                * IRONEYE_WEAKNESS_MARK_SCALE;
             for (index, slot) in IRONEYE_WEAKNESS_ATLAS_SLOTS.into_iter().enumerate() {
                 let dir = directions[index];
                 let pos = [
@@ -683,7 +821,7 @@ fn draw_ironeye_weakness_marks(
             ui.get_foreground_draw_list()
                 .add_circle(burst.pos, half * 0.66, color)
                 .num_segments(48)
-                .thickness(4.0)
+                .thickness(scale_legacy_4k_pixels(4.0, scale))
                 .build();
         }
     }
@@ -862,6 +1000,7 @@ fn draw_scholar_observation_ui(
     icons: &ScholarIconSet,
     _now: Instant,
     _animation_start: Instant,
+    scale: f32,
 ) {
     if !snapshot.scholar_observing {
         return;
@@ -885,7 +1024,7 @@ fn draw_scholar_observation_ui(
         ui.get_foreground_draw_list()
             .add_circle(center, lens_half, ImColor32::from_rgba(220, 235, 255, 120))
             .num_segments(160)
-            .thickness(3.0)
+            .thickness(scale_legacy_4k_pixels(3.0, scale))
             .build();
     }
 
@@ -893,7 +1032,7 @@ fn draw_scholar_observation_ui(
         if !target.active || target.progress <= 0.0 {
             continue;
         }
-        draw_scholar_target_marker(ui, target, icons);
+        draw_scholar_target_marker(ui, target, icons, scale);
     }
 
     if SCHOLAR_SCAN_DEBUG_VISIBLE {
@@ -930,7 +1069,8 @@ fn draw_multi_locking_targets(
     }
 }
 
-fn draw_scholar_damage_numbers(_ui: &Ui, snapshot: &HudSnapshot) {
+fn draw_scholar_damage_numbers(_ui: &Ui, snapshot: &HudSnapshot, scale: f32) {
+    let pixel_scale = scale / HUD_LEGACY_4K_SCALE;
     for number in snapshot.scholar_damage_numbers {
         if !number.active || number.amount <= 0 {
             continue;
@@ -940,18 +1080,21 @@ fn draw_scholar_damage_numbers(_ui: &Ui, snapshot: &HudSnapshot) {
         if alpha == 0 {
             continue;
         }
-        let font_size = lerp(31.0, 23.0, t);
+        let font_size = lerp(31.0, 23.0, t) * pixel_scale;
         let text = number.amount.to_string();
         let text_width = text.len() as f32 * font_size * 0.54;
-        let drift_x = (number.seed - 2.0) * 11.0 * t;
+        let drift_x = (number.seed - 2.0) * 11.0 * pixel_scale * t;
         let pos = [
             number.pos[0] - text_width * 0.5 + drift_x,
-            number.pos[1] - 62.0 - 44.0 * t,
+            number.pos[1] - (62.0 + 44.0 * t) * pixel_scale,
         ];
         let shadow = ImColor32::from_rgba(18, 8, 4, (alpha as f32 * 0.72) as u8);
         for offset in [[2.0, 2.0], [-1.0, 2.0], [2.0, -1.0]] {
             draw_sized_text(
-                [pos[0] + offset[0], pos[1] + offset[1]],
+                [
+                    pos[0] + offset[0] * pixel_scale,
+                    pos[1] + offset[1] * pixel_scale,
+                ],
                 font_size,
                 shadow,
                 &text,
@@ -1160,9 +1303,14 @@ fn draw_scholar_debug(debug: ScholarScanDebug) {
     );
 }
 
-fn draw_scholar_target_marker(ui: &Ui, target: ScholarTargetSnapshot, icons: &ScholarIconSet) {
+fn draw_scholar_target_marker(
+    ui: &Ui,
+    target: ScholarTargetSnapshot,
+    icons: &ScholarIconSet,
+    scale: f32,
+) {
     let progress = target.progress.clamp(0.0, 1.0);
-    let half = 62.0;
+    let half = scale_legacy_4k_pixels(62.0, scale);
     let (red_color, pointer_color) = if target.observed {
         scholar_marker_progress_colors(progress)
     } else {
@@ -1227,7 +1375,7 @@ fn draw_scholar_target_marker(ui: &Ui, target: ScholarTargetSnapshot, icons: &Sc
                 pointer_color,
             );
         } else {
-            draw_scholar_decay_pointer(ui, target.pos, half, angle, pointer_color);
+            draw_scholar_decay_pointer(ui, target.pos, half, angle, pointer_color, scale);
         }
     }
 
@@ -1372,6 +1520,7 @@ fn draw_scholar_decay_pointer(
     radius: f32,
     angle: f32,
     color: ImColor32,
+    scale: f32,
 ) {
     let dir = [angle.sin(), -angle.cos()];
     let start = [
@@ -1384,9 +1533,11 @@ fn draw_scholar_decay_pointer(
     ];
     let draw = ui.get_foreground_draw_list();
     draw.add_line(start, end, ImColor32::from_rgba(20, 24, 28, 190))
-        .thickness(5.0)
+        .thickness(scale_legacy_4k_pixels(5.0, scale))
         .build();
-    draw.add_line(start, end, color).thickness(2.7).build();
+    draw.add_line(start, end, color)
+        .thickness(scale_legacy_4k_pixels(2.7, scale))
+        .build();
 }
 
 fn draw_centered_texture(
@@ -1468,6 +1619,10 @@ const IRONEYE_RETICLE_ATLAS_SLOTS: [usize; 3] = [0, 1, 2];
 const IRONEYE_WEAKNESS_ATLAS_SLOTS: [usize; 4] = [3, 4, 5, 6];
 const WYLDER_SKILL_LOCK_HALF_SIZE: f32 = 116.0;
 const WYLDER_SKILL_LOCK_Y_OFFSET: f32 = -40.0;
+const RECLUSE_LOCK_MARK_SCALE: f32 = 0.75;
+const RESURRECTION_ACCUMULATION_ATLAS_SLOTS: usize = 2;
+const RESURRECTION_ACCUMULATION_HALF_SIZE: f32 = 112.0;
+const RESURRECTION_ACCUMULATION_CENTER_Y_FACTOR: f32 = 0.32;
 const SCHOLAR_ENEMY_ATLAS_SLOTS: usize = 5;
 const SCHOLAR_ENEMY_FULL_ATLAS_SLOT: usize = 0;
 const SCHOLAR_ENEMY_POINTER_ATLAS_SLOT: usize = 1;
