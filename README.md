@@ -2,13 +2,23 @@
 
 Experimental Elden Ring / Nightreign-style HUD DLL built on top of `fromsoftware-rs`.
 
-This is a trimmed workspace that keeps only the crates needed by
-`examples/nightreign-style-hud`:
+This repository contains only the four DLL application crates:
 
-- `crates/shared`
-- `crates/eldenring`
-- `crates/debug`
 - `examples/nightreign-style-hud`
+- `examples/nightreign-precision-aim`
+- `examples/nightreign-attack-summon`
+- `examples/nightreign-camera-debug`
+
+The `fromsoftware-shared`, `eldenring`, and `debug` crates are fetched by Cargo
+from [KamiyamaShiki0704/fromsoftware-rs](https://github.com/KamiyamaShiki0704/fromsoftware-rs)
+and pinned to the immutable compatibility commit:
+
+```text
+f96aa78e26d51838c31c411e05a41834631d54d5
+```
+
+They are deliberately not vendored into this repository. `Cargo.lock` records
+the same resolved commit, so builds do not follow a moving branch or tag.
 
 ## Build
 
@@ -172,29 +182,18 @@ runtime writes `880005` for ultimate readiness.
     miss would be misclassified as a wall hit.
   - A valid `30910001` receipt enters the existing one-update arbitration
     delay. Target `883122/883123` always wins if it appears during that delay.
+  - Only the first valid `30910001` is accepted during one continuous `883120`
+    activation. Later receipts return through an atomic fast path without
+    resolving the world, parent Bullet, or shared contact slot. Removing and
+    reapplying `883120` rearms the next hookshot attempt.
   - The first candidate native dispatcher at Elden Ring 2.6.2 RVA `0x44BA40`
     (`0x44BFA0` on 2.7.0.0) did not emit this output for player AtkParam
     `498210`, even after its hit type was changed to `3`; it remains diagnostic
     rather than required by the Bullet route.
-  - The current diagnostic build displays `[DEBUG-wylder-map-a41c]` in the
-    top-left while `883120` is active. Its counters separately report hook
-    installation, entry calls, last collision kind, kind-3 calls, local-player
-    owner matches, `883120` matches, finite contacts, completed captures, and
-    `30910001` receipt seen/owner/capture counts.
-    These counters are observational and never authorize `883124..883126`.
-  - A third diagnostic line hooks the final PC/NPC AtkParam lookup and filters
-    exact AtkParam ID `498210`. It reports lookup-hook status, lookup count,
-    table selector (`PC(1)` is expected), and a validated immediate return RVA
-    from the direct call into the lookup. The `s30` and `s70` values are retained
-    stack words for comparison only and are not labelled as callers. This
-    identifies the real direct lookup call site without changing gameplay.
-  - Two additional diagnostic lines observe the native impact-effect function
-    at Elden Ring 2.6.2 RVA `0x708A40` (`0x709890` on 2.7.0.0). While `883120`
-    is active they report
-    exact `PC AtkParam 498210` impact contexts, per-caller counts for return
-    RVAs `38B6F5`, `44AFF7`, and `6DE302`, plus the context's world position at
-    `+0x1A0`. This remains observational until wall/enemy/miss tests prove one
-    caller pattern is map-specific.
+  - The old `[DEBUG-wylder-map-a41c]`, AtkParam-lookup, and generic impact
+    probes are disabled in normal builds. They were observational only and
+    never authorized `883124..883126`; leaving their global detours active
+    added unnecessary work during the hookshot window.
   - Internal pulse `883127` belongs to the disproven player-`c0000` experiment
     and is no longer required for native map detection. It remains accepted by
     the resolver temporarily for compatibility and must not be used as an
@@ -416,15 +415,28 @@ runtime writes `880005` for ultimate readiness.
 
 ### Resurrection Accumulation HUD
 
-- Player visibility Speffect: `102108`.
-- The widget is role-independent and appears at the upper center of the screen.
+- Visibility Speffect: `102108` on the affected player.
+- The widget is role-independent. The local affected player sees the existing
+  full-size widget at the upper center of the screen.
+- In multiplayer, an observer also sees a half-size copy above every loaded
+  friendly player's head while that teammate's replicated `102108` is active.
+  Each copy uses that teammate's own super-armor values.
+- Teammate copies accept remote `Local`, white, blue, and explicit same-team
+  player entries. The local player, invaders, hostile/NPC/ghost player types,
+  invalid handles, and unloaded/disabled entries are excluded.
+- Teammate copies are hidden when their world anchor is behind the camera or
+  outside the screen. They remain visible through world geometry; no additional
+  line-of-sight ray is applied.
 - `ResurrectionAccumulation_1.png` is the persistent base while active.
 - `ResurrectionAccumulation_2.png` is clipped to the player's current
   `sa_durability / sa_durability_max` ratio.
 - At full super armor all three purple sections are visible. As super armor is
   reduced, the overlay disappears counterclockwise from the upper-left; at zero
   none of the purple overlay remains.
-- Removing `102108` hides the complete widget.
+- Removing `102108` hides that player's complete widget. The DLL does not send
+  custom network state, so multiplayer display requires `102108` and the
+  player's super-armor state to be replicated to the observer's remote
+  `PlayerIns` by the game/mod setup.
 
 ### Camera-Directed Movement
 

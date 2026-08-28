@@ -199,6 +199,7 @@ dependencies = [
 [[package]]
 name = "debug"
 version = "0.14.0"
+source = "git+https://github.com/KamiyamaShiki0704/fromsoftware-rs?rev=f96aa78e26d51838c31c411e05a41834631d54d5#f96aa78e26d51838c31c411e05a41834631d54d5"
 dependencies = [
  "bitflags 2.11.1",
  "clipboard-win",
@@ -237,6 +238,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "eldenring"
 version = "0.14.0"
+source = "git+https://github.com/KamiyamaShiki0704/fromsoftware-rs?rev=f96aa78e26d51838c31c411e05a41834631d54d5#f96aa78e26d51838c31c411e05a41834631d54d5"
 dependencies = [
  "bitfield",
  "bitflags 2.11.1",
@@ -350,6 +352,7 @@ dependencies = [
 [[package]]
 name = "fromsoftware-shared"
 version = "0.14.0"
+source = "git+https://github.com/KamiyamaShiki0704/fromsoftware-rs?rev=f96aa78e26d51838c31c411e05a41834631d54d5#f96aa78e26d51838c31c411e05a41834631d54d5"
 dependencies = [
  "bitflags 2.11.1",
  "from-singleton",
@@ -365,6 +368,7 @@ dependencies = [
 [[package]]
 name = "fromsoftware-shared-macros"
 version = "0.14.0"
+source = "git+https://github.com/KamiyamaShiki0704/fromsoftware-rs?rev=f96aa78e26d51838c31c411e05a41834631d54d5#f96aa78e26d51838c31c411e05a41834631d54d5"
 dependencies = [
  "inflections",
  "proc-macro2",
@@ -375,6 +379,7 @@ dependencies = [
 [[package]]
 name = "fromsoftware-shared-stl"
 version = "0.14.0"
+source = "git+https://github.com/KamiyamaShiki0704/fromsoftware-rs?rev=f96aa78e26d51838c31c411e05a41834631d54d5#f96aa78e26d51838c31c411e05a41834631d54d5"
 
 [[package]]
 name = "fxhash"
