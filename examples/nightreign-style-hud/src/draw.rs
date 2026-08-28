@@ -216,22 +216,47 @@ fn draw_recluse_lock_debug_points(ui: &Ui, points: LockDebugPoints) {
 fn draw_resurrection_accumulation_ui(
     ui: &Ui,
     snapshot: ResurrectionAccumulationSnapshot,
+    teammate_snapshots: &[TeammateResurrectionAccumulationSnapshot],
     texture_id: Option<TextureId>,
     scale: f32,
 ) {
-    if !snapshot.active {
-        return;
-    }
     let Some(texture_id) = texture_id else {
         return;
     };
 
-    let viewport = ui.io().display_size;
-    let center = [
-        snap_px(viewport[0] * 0.5),
-        snap_px(viewport[1] * RESURRECTION_ACCUMULATION_CENTER_Y_FACTOR),
-    ];
-    let half = RESURRECTION_ACCUMULATION_HALF_SIZE * scale;
+    if snapshot.active {
+        let viewport = ui.io().display_size;
+        let center = [
+            snap_px(viewport[0] * 0.5),
+            snap_px(viewport[1] * RESURRECTION_ACCUMULATION_CENTER_Y_FACTOR),
+        ];
+        draw_resurrection_accumulation_widget(
+            ui,
+            center,
+            RESURRECTION_ACCUMULATION_HALF_SIZE * scale,
+            texture_id,
+            snapshot.progress,
+        );
+    }
+
+    for teammate in teammate_snapshots {
+        draw_resurrection_accumulation_widget(
+            ui,
+            [snap_px(teammate.screen_pos[0]), snap_px(teammate.screen_pos[1])],
+            RESURRECTION_ACCUMULATION_TEAMMATE_HALF_SIZE * scale,
+            texture_id,
+            teammate.progress,
+        );
+    }
+}
+
+fn draw_resurrection_accumulation_widget(
+    ui: &Ui,
+    center: [f32; 2],
+    half: f32,
+    texture_id: TextureId,
+    progress: f32,
+) {
     let (base_uv_min, base_uv_max) = atlas_uv(0, RESURRECTION_ACCUMULATION_ATLAS_SLOTS);
     let (fill_uv_min, fill_uv_max) = atlas_uv(1, RESURRECTION_ACCUMULATION_ATLAS_SLOTS);
     let color = ImColor32::from_rgba(255, 255, 255, 255);
@@ -252,7 +277,7 @@ fn draw_resurrection_accumulation_ui(
         texture_id,
         fill_uv_min,
         fill_uv_max,
-        snapshot.progress,
+        progress,
         color,
     );
 }
@@ -1622,6 +1647,7 @@ const WYLDER_SKILL_LOCK_Y_OFFSET: f32 = -40.0;
 const RECLUSE_LOCK_MARK_SCALE: f32 = 0.75;
 const RESURRECTION_ACCUMULATION_ATLAS_SLOTS: usize = 2;
 const RESURRECTION_ACCUMULATION_HALF_SIZE: f32 = 112.0;
+const RESURRECTION_ACCUMULATION_TEAMMATE_HALF_SIZE: f32 = 56.0;
 const RESURRECTION_ACCUMULATION_CENTER_Y_FACTOR: f32 = 0.32;
 const SCHOLAR_ENEMY_ATLAS_SLOTS: usize = 5;
 const SCHOLAR_ENEMY_FULL_ATLAS_SLOT: usize = 0;

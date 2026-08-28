@@ -51,6 +51,12 @@ struct ResurrectionAccumulationSnapshot {
     progress: f32,
 }
 
+#[derive(Clone, Copy, Default)]
+struct TeammateResurrectionAccumulationSnapshot {
+    progress: f32,
+    screen_pos: [f32; 2],
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WylderHookshotNativeResult {
     PullEnemy,
@@ -222,6 +228,10 @@ struct WylderHookshotNativeResolver {
 }
 
 impl WylderHookshotNativeResolver {
+    fn is_resolved(&self) -> bool {
+        self.active && self.result.is_some()
+    }
+
     fn update(
         &mut self,
         active: bool,
@@ -327,6 +337,7 @@ struct ChargeState {
     revenant_debug_souls: Vec<RevenantDebugSoul>,
     revenant_seen_deaths: HashSet<FieldInsHandle>,
     resurrection_accumulation: ResurrectionAccumulationSnapshot,
+    teammate_resurrection_accumulations: Vec<TeammateResurrectionAccumulationSnapshot>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -441,6 +452,7 @@ impl ChargeState {
             revenant_debug_souls: Vec::new(),
             revenant_seen_deaths: HashSet::new(),
             resurrection_accumulation: ResurrectionAccumulationSnapshot::default(),
+            teammate_resurrection_accumulations: Vec::new(),
         }
     }
 
@@ -448,6 +460,7 @@ impl ChargeState {
         let delta = (now - self.last_update).as_secs_f32().clamp(0.0, 0.25);
         self.last_update = now;
         self.resurrection_accumulation = ResurrectionAccumulationSnapshot::default();
+        self.teammate_resurrection_accumulations.clear();
 
         let world_chr_man = unsafe { WorldChrMan::instance_mut() }.ok()?;
         self.finish_revenant_map_refresh_cleanup(world_chr_man);
@@ -456,6 +469,9 @@ impl ChargeState {
             locked_on_enemy,
             action_pressed,
             super_armor_progress,
+            player_handle,
+            player_team_type,
+            player_position,
         ) = {
             let player = world_chr_man.main_player.as_mut()?;
             update_local_damage_module(player);
@@ -476,12 +492,22 @@ impl ChargeState {
                 player.locked_on_enemy,
                 action_pressed,
                 super_armor_progress,
+                player.chr_ins.field_ins_handle,
+                player.chr_ins.team_type,
+                player.chr_ins.modules.as_ref().physics.as_ref().position,
             )
         };
         self.resurrection_accumulation = ResurrectionAccumulationSnapshot {
             active: active_effects.contains(&SP_RESURRECTION_ACCUMULATION_HUD),
             progress: super_armor_progress,
         };
+        collect_resurrection_accumulation_teammate_snapshots(
+            &mut self.teammate_resurrection_accumulations,
+            world_chr_man,
+            player_handle,
+            player_team_type,
+            player_position,
+        );
 
         let role = active_role_from_effects(&active_effects);
         let damage_hook_events = drain_damage_hook_events();
@@ -653,6 +679,12 @@ impl ChargeState {
 
     fn resurrection_accumulation_snapshot(&self) -> ResurrectionAccumulationSnapshot {
         self.resurrection_accumulation
+    }
+
+    fn teammate_resurrection_accumulation_snapshots(
+        &self,
+    ) -> &[TeammateResurrectionAccumulationSnapshot] {
+        &self.teammate_resurrection_accumulations
     }
 
     fn begin_map_refresh(&mut self) {
@@ -1427,6 +1459,9 @@ impl ChargeState {
             clear_wylder_hookshot_map_contact();
             self.wylder_hookshot_native.update(false, None, false);
             clear_wylder_hookshot_player_outputs(world_chr_man);
+            return;
+        }
+        if self.wylder_hookshot_native.is_resolved() {
             return;
         }
 
@@ -3920,6 +3955,87 @@ fn hp_ratio_from_u32(hp: u32, max_hp: u32) -> Option<f32> {
     Some((hp as f32 / max_hp as f32).clamp(0.0, 1.0))
 }
 
+fn collect_resurrection_accumulation_teammate_snapshots(
+    snapshots: &mut Vec<TeammateResurrectionAccumulationSnapshot>,
+    world_chr_man: &WorldChrMan,
+    player_handle: FieldInsHandle,
+    player_team_type: u8,
+    player_position: HavokPosition,
+) {
+    snapshots.extend(world_chr_man.player_chr_set.characters().filter_map(|candidate| {
+            let chr = &candidate.chr_ins;
+            let friendly = resurrection_accumulation_teammate_is_friendly(
+                chr.chr_type,
+                chr.team_type,
+                player_team_type,
+            );
+            let runtime_visible = !chr.debug_flags.force_unloaded()
+                && !chr.debug_flags.character_disabled()
+                && !chr.load_state.backread_disabled();
+            if !resurrection_accumulation_teammate_should_display(
+                chr.field_ins_handle.is_empty(),
+                chr.field_ins_handle == player_handle,
+                friendly,
+                runtime_visible,
+                chr_has_speffect(chr, SP_RESURRECTION_ACCUMULATION_HUD),
+            ) {
+                return None;
+            }
+
+            let super_armor = chr.modules.as_ref().super_armor.as_ref();
+            let screen_pos =
+                resurrection_accumulation_teammate_screen_pos(player_position, chr)?;
+            Some(TeammateResurrectionAccumulationSnapshot {
+                progress: normalized_super_armor(
+                    super_armor.sa_durability,
+                    super_armor.sa_durability_max,
+                ),
+                screen_pos,
+            })
+        }))
+}
+
+fn resurrection_accumulation_teammate_is_friendly(
+    chr_type: ChrType,
+    candidate_team_type: u8,
+    player_team_type: u8,
+) -> bool {
+    if matches!(
+        chr_type,
+        ChrType::None
+            | ChrType::Duelist
+            | ChrType::Ghost
+            | ChrType::Ghost1
+            | ChrType::Npc
+            | ChrType::BloodstainGhost
+            | ChrType::BonfireGhost
+            | ChrType::MessageGhost
+            | ChrType::BloodyFinger
+            | ChrType::Recusant
+            | ChrType::FesteringBloodyFinger
+            | ChrType::WhiteSummonNpc
+            | ChrType::BloodyFingerNpc
+            | ChrType::RecusantNpc
+    ) {
+        return false;
+    }
+
+    matches!(
+        chr_type,
+        ChrType::Local | ChrType::WhitePhantom | ChrType::BluePhantom
+    ) || (player_team_type != 0 && candidate_team_type == player_team_type)
+}
+
+fn resurrection_accumulation_teammate_should_display(
+    empty_handle: bool,
+    local_player: bool,
+    friendly: bool,
+    runtime_visible: bool,
+    has_activation_effect: bool,
+) -> bool {
+    !empty_handle && !local_player && friendly && runtime_visible && has_activation_effect
+}
+
 fn normalized_super_armor(current: f32, maximum: f32) -> f32 {
     if !current.is_finite() || !maximum.is_finite() || maximum <= 0.0 {
         return 0.0;
@@ -4551,9 +4667,11 @@ fn remove_all_role_outputs(player: &mut eldenring::cs::PlayerIns) {
 mod revenant_active_effect_tests {
     use super::{
         ChargeState, REVENANT_SUMMON_COUNT, WylderHookshotNativeResolver,
-        WylderHookshotNativeResult, normalized_super_armor, revenant_active_effect_index,
+        WylderHookshotNativeResult, normalized_super_armor,
+        resurrection_accumulation_teammate_is_friendly, revenant_active_effect_index,
+        resurrection_accumulation_teammate_should_display,
     };
-    use eldenring::cs::FieldInsHandle;
+    use eldenring::cs::{ChrType, FieldInsHandle};
     use std::time::Instant;
 
     #[test]
@@ -4612,6 +4730,68 @@ mod revenant_active_effect_tests {
         assert_eq!(normalized_super_armor(10.0, 0.0), 0.0);
         assert_eq!(normalized_super_armor(f32::NAN, 100.0), 0.0);
         assert_eq!(normalized_super_armor(10.0, f32::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn resurrection_teammates_accept_coop_player_types_and_explicit_same_team() {
+        for chr_type in [
+            ChrType::Local,
+            ChrType::WhitePhantom,
+            ChrType::BluePhantom,
+        ] {
+            assert!(resurrection_accumulation_teammate_is_friendly(
+                chr_type, 0, 0
+            ));
+        }
+        assert!(resurrection_accumulation_teammate_is_friendly(
+            ChrType::Arena,
+            47,
+            47
+        ));
+    }
+
+    #[test]
+    fn resurrection_teammates_reject_hostile_and_npc_player_types() {
+        for chr_type in [
+            ChrType::Duelist,
+            ChrType::BloodyFinger,
+            ChrType::Recusant,
+            ChrType::FesteringBloodyFinger,
+            ChrType::Npc,
+            ChrType::WhiteSummonNpc,
+            ChrType::Ghost,
+        ] {
+            assert!(!resurrection_accumulation_teammate_is_friendly(
+                chr_type, 0, 0
+            ));
+        }
+        assert!(!resurrection_accumulation_teammate_is_friendly(
+            ChrType::BloodyFinger,
+            47,
+            47
+        ));
+    }
+
+    #[test]
+    fn resurrection_teammate_display_requires_remote_visible_friendly_with_effect() {
+        assert!(resurrection_accumulation_teammate_should_display(
+            false, false, true, true, true
+        ));
+        assert!(!resurrection_accumulation_teammate_should_display(
+            true, false, true, true, true
+        ));
+        assert!(!resurrection_accumulation_teammate_should_display(
+            false, true, true, true, true
+        ));
+        assert!(!resurrection_accumulation_teammate_should_display(
+            false, false, false, true, true
+        ));
+        assert!(!resurrection_accumulation_teammate_should_display(
+            false, false, true, false, true
+        ));
+        assert!(!resurrection_accumulation_teammate_should_display(
+            false, false, true, true, false
+        ));
     }
 
     #[test]

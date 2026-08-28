@@ -53,6 +53,7 @@ static WYLDER_HOOKSHOT_MAP_CAPTURES: AtomicU32 = AtomicU32::new(0);
 static WYLDER_HOOKSHOT_MAP_BULLET_RECEIPT_SEEN: AtomicU32 = AtomicU32::new(0);
 static WYLDER_HOOKSHOT_MAP_BULLET_OWNER_MATCHES: AtomicU32 = AtomicU32::new(0);
 static WYLDER_HOOKSHOT_MAP_BULLET_CAPTURES: AtomicU32 = AtomicU32::new(0);
+static WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED: AtomicBool = AtomicBool::new(false);
 static WYLDER_HOOKSHOT_MAP_LAST_OWNER: AtomicUsize = AtomicUsize::new(0);
 static WYLDER_HOOKSHOT_ATK_LOOKUP_HOOK_STATUS: AtomicU32 = AtomicU32::new(0);
 static WYLDER_HOOKSHOT_ATK_LOOKUP_CALLS: AtomicU32 = AtomicU32::new(0);
@@ -311,6 +312,9 @@ const RECLUSE_MARKER_AABB_HEIGHT_FACTOR: f32 = 0.58;
 const RECLUSE_MARKER_FALLBACK_BODY_LIFT: f32 = 1.35;
 const RECLUSE_MARKER_MIN_LOCK_LIFT: f32 = 0.35;
 const RECLUSE_MARKER_MAX_LOCK_LIFT: f32 = 18.0;
+const RESURRECTION_TEAMMATE_FALLBACK_HEAD_LIFT: f32 = 1.9;
+const RESURRECTION_TEAMMATE_HEAD_PADDING: f32 = 0.35;
+const RESURRECTION_TEAMMATE_MAX_HEAD_LIFT: f32 = 8.0;
 type LockDebugPoints = [Option<[f32; 2]>; 5];
 
 #[derive(Clone, Copy)]
@@ -838,7 +842,39 @@ fn set_wylder_hookshot_player_chr(player_chr: Option<&ChrIns>) {
 }
 
 fn set_wylder_hookshot_map_probe_visible(visible: bool) {
-    WYLDER_HOOKSHOT_MAP_PROBE_VISIBLE.store(visible, Ordering::Release);
+    let was_visible = WYLDER_HOOKSHOT_MAP_PROBE_VISIBLE.swap(visible, Ordering::AcqRel);
+    let accepted = WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED.load(Ordering::Acquire);
+    let next_accepted = wylder_hookshot_receipt_latch_after_active_change(
+        was_visible,
+        visible,
+        accepted,
+    );
+    if next_accepted != accepted {
+        WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED.store(next_accepted, Ordering::Release);
+    }
+}
+
+fn wylder_hookshot_receipt_latch_after_active_change(
+    was_active: bool,
+    active: bool,
+    accepted: bool,
+) -> bool {
+    if !active || !was_active {
+        false
+    } else {
+        accepted
+    }
+}
+
+fn should_resolve_wylder_hookshot_map_receipt(active: bool, accepted: bool) -> bool {
+    active && !accepted
+}
+
+fn wylder_hookshot_map_receipt_gate_is_open() -> bool {
+    should_resolve_wylder_hookshot_map_receipt(
+        WYLDER_HOOKSHOT_MAP_PROBE_VISIBLE.load(Ordering::Acquire),
+        WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED.load(Ordering::Acquire),
+    )
 }
 
 fn wylder_hookshot_map_probe_snapshot() -> WylderHookshotMapProbeSnapshot {
@@ -1134,8 +1170,13 @@ fn capture_wylder_hookshot_map_bullet_receipt(
     spawn_data: *mut BulletSpawnData,
     owner: FieldInsHandle,
 ) {
-    WYLDER_HOOKSHOT_MAP_BULLET_RECEIPT_SEEN.fetch_add(1, Ordering::Relaxed);
     let active = WYLDER_HOOKSHOT_MAP_PROBE_VISIBLE.load(Ordering::Acquire);
+    let accepted = WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED.load(Ordering::Acquire);
+    if !should_resolve_wylder_hookshot_map_receipt(active, accepted) {
+        return;
+    }
+    WYLDER_HOOKSHOT_MAP_BULLET_RECEIPT_SEEN.fetch_add(1, Ordering::Relaxed);
+
     let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
         return;
     };
@@ -1163,10 +1204,22 @@ fn capture_wylder_hookshot_map_bullet_receipt(
     ) else {
         return;
     };
-    if let Ok(mut slot) = WYLDER_HOOKSHOT_MAP_CONTACT.lock() {
-        *slot = Some(contact);
-        WYLDER_HOOKSHOT_MAP_BULLET_CAPTURES.fetch_add(1, Ordering::Relaxed);
-        WYLDER_HOOKSHOT_MAP_CAPTURES.fetch_add(1, Ordering::Relaxed);
+
+    if WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    match WYLDER_HOOKSHOT_MAP_CONTACT.lock() {
+        Ok(mut slot) => {
+            *slot = Some(contact);
+            WYLDER_HOOKSHOT_MAP_BULLET_CAPTURES.fetch_add(1, Ordering::Relaxed);
+            WYLDER_HOOKSHOT_MAP_CAPTURES.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(_) => {
+            WYLDER_HOOKSHOT_MAP_RECEIPT_ACCEPTED.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -1184,10 +1237,15 @@ fn apply_bullet_spawn_hook(regs: *mut ilhook::x64::Registers) {
     let bullet_id = unsafe {
         read_i32((spawn_data as usize) + BULLET_SPAWN_BULLET_ID_OFFSET)
     };
-    let owner = unsafe { read_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_OWNER_OFFSET) };
     match wylder_hookshot_bullet_kind(bullet_id) {
         WylderHookshotBulletKind::MapSensor => return,
         WylderHookshotBulletKind::MapReceipt => {
+            if !wylder_hookshot_map_receipt_gate_is_open() {
+                return;
+            }
+            let owner = unsafe {
+                read_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_OWNER_OFFSET)
+            };
             capture_wylder_hookshot_map_bullet_receipt(manager, spawn_data, owner);
             return;
         }
@@ -1197,6 +1255,7 @@ fn apply_bullet_spawn_hook(regs: *mut ilhook::x64::Registers) {
         return;
     }
 
+    let owner = unsafe { read_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_OWNER_OFFSET) };
     let original_target =
         unsafe { read_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_TARGET_OFFSET) };
     let Some(target_plan) = multi_lock_bullet_targets(owner, original_target, manager) else {
@@ -2393,19 +2452,35 @@ fn ironeye_weakness_marker_screen_pos(
     player: &PlayerIns,
     target: &ChrIns,
 ) -> Option<[f32; 2]> {
+    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
+    project_character_marker_screen_pos(player_pos, scholar_body_marker_position(target))
+}
+
+fn resurrection_accumulation_teammate_screen_pos(
+    player_position: HavokPosition,
+    teammate: &ChrIns,
+) -> Option<[f32; 2]> {
+    project_character_marker_screen_pos(
+        player_position,
+        resurrection_accumulation_teammate_marker_position(teammate),
+    )
+}
+
+fn project_character_marker_screen_pos(
+    player_position: HavokPosition,
+    target_position: fromsoftware_shared::F32Vector4,
+) -> Option<[f32; 2]> {
     let camera = unsafe { CSCamera::instance() }.ok()?;
     let camera = camera.pers_cam_1.as_ref();
     let camera_pos = camera.position();
-    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
-    let target_pos = scholar_body_marker_position(target);
     camera_depths_on_same_projection_side(
         [camera_pos.0, camera_pos.1, camera_pos.2],
         [camera.matrix.2.0, camera.matrix.2.1, camera.matrix.2.2],
-        [player_pos.0, player_pos.1, player_pos.2],
-        [target_pos.0, target_pos.1, target_pos.2],
+        [player_position.0, player_position.1, player_position.2],
+        [target_position.0, target_position.1, target_position.2],
     )?;
 
-    project_lock_on_position(target_pos, camera).filter(|pos| scholar_screen_pos_on_view(*pos))
+    project_lock_on_position(target_position, camera).filter(|pos| scholar_screen_pos_on_view(*pos))
 }
 
 fn scholar_body_marker_position(target: &ChrIns) -> fromsoftware_shared::F32Vector4 {
@@ -2856,6 +2931,30 @@ fn scholar_los_filter_debug(target: &ChrIns, player: &PlayerIns) -> (f32, u32, u
     )
 }
 
+fn resurrection_accumulation_teammate_marker_position(
+    teammate: &ChrIns,
+) -> fromsoftware_shared::F32Vector4 {
+    let ctrl = teammate.chr_ctrl.as_ref();
+    let tag_offset = ctrl.lock_on_chr_tag_dmypoly_offset;
+    let physics = teammate.modules.as_ref().physics.as_ref();
+    let base = physics.position;
+    let scale = ctrl.scale_size_y.abs().clamp(0.5, 4.0);
+    let hit_height = if physics.hit_height.is_finite() && physics.hit_height > 0.1 {
+        physics.hit_height
+    } else {
+        RESURRECTION_TEAMMATE_FALLBACK_HEAD_LIFT * scale
+    };
+    let lift = (hit_height + RESURRECTION_TEAMMATE_HEAD_PADDING * scale)
+        .clamp(RECLUSE_MARKER_MIN_LOCK_LIFT, RESURRECTION_TEAMMATE_MAX_HEAD_LIFT);
+
+    fromsoftware_shared::F32Vector4(
+        base.0 + tag_offset.0,
+        base.1 + lift,
+        base.2 + tag_offset.2,
+        1.0,
+    )
+}
+
 fn scholar_is_event_hidden(chr: &eldenring::cs::ChrIns) -> bool {
     let chr_set_entry = unsafe { chr.chr_set_entry.as_ref() };
     chr.chr_flags1c5.death_flag()
@@ -3081,8 +3180,9 @@ mod wylder_hookshot_map_contact_tests {
     use super::{
         DirectionalVector, HavokPosition, WYLDER_HOOKSHOT_MAP_RECEIPT_BULLET_ID,
         WYLDER_HOOKSHOT_MAP_SENSOR_BULLET_ID, WylderHookshotBulletKind,
-        WylderHookshotMapContact, wylder_hookshot_bullet_kind,
-        wylder_hookshot_map_receipt_contact,
+        WylderHookshotMapContact, should_resolve_wylder_hookshot_map_receipt,
+        wylder_hookshot_bullet_kind, wylder_hookshot_map_receipt_contact,
+        wylder_hookshot_receipt_latch_after_active_change,
     };
 
     #[test]
@@ -3168,6 +3268,30 @@ mod wylder_hookshot_map_contact_tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn receipt_fast_path_rejects_inactive_and_duplicate_receipts() {
+        assert!(should_resolve_wylder_hookshot_map_receipt(true, false));
+        assert!(!should_resolve_wylder_hookshot_map_receipt(false, false));
+        assert!(!should_resolve_wylder_hookshot_map_receipt(true, true));
+        assert!(!should_resolve_wylder_hookshot_map_receipt(false, true));
+    }
+
+    #[test]
+    fn receipt_latch_rearms_only_for_a_new_active_attempt() {
+        assert!(!wylder_hookshot_receipt_latch_after_active_change(
+            false, true, true
+        ));
+        assert!(wylder_hookshot_receipt_latch_after_active_change(
+            true, true, true
+        ));
+        assert!(!wylder_hookshot_receipt_latch_after_active_change(
+            true, false, true
+        ));
+        assert!(!wylder_hookshot_receipt_latch_after_active_change(
+            false, false, true
+        ));
     }
 }
 

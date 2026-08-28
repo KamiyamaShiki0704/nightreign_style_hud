@@ -60,6 +60,7 @@ impl NightreignStyleHud {
 const HUD_REFERENCE_WIDTH: f32 = 2560.0;
 const HUD_REFERENCE_HEIGHT: f32 = 1440.0;
 const HUD_LEGACY_4K_SCALE: f32 = 1.5;
+const WYLDER_HOOKSHOT_NATIVE_DIAGNOSTICS_ENABLED: bool = false;
 
 fn hud_scale_for_viewport(viewport: [f32; 2]) -> f32 {
     let [width, height] = viewport;
@@ -79,9 +80,11 @@ impl ImguiRenderLoop for NightreignStyleHud {
         ctx.io_mut().config_flags |= hudhook::imgui::ConfigFlags::NO_MOUSE_CURSOR_CHANGE;
         self.icons.load(render_context);
         install_damage_hook_once();
-        install_wylder_hookshot_map_collision_hook_once();
-        install_wylder_hookshot_atk_lookup_hook_once();
-        install_wylder_hookshot_impact_hook_once();
+        if WYLDER_HOOKSHOT_NATIVE_DIAGNOSTICS_ENABLED {
+            install_wylder_hookshot_map_collision_hook_once();
+            install_wylder_hookshot_atk_lookup_hook_once();
+            install_wylder_hookshot_impact_hook_once();
+        }
         install_revenant_summon_range_hook_once();
         install_camera_directed_position_hook_once();
         install_multi_lock_bullet_hook_once();
@@ -106,6 +109,8 @@ impl ImguiRenderLoop for NightreignStyleHud {
         draw_resurrection_accumulation_ui(
             ui,
             self.charges.resurrection_accumulation_snapshot(),
+            self.charges
+                .teammate_resurrection_accumulation_snapshots(),
             self.icons.resurrection_accumulation,
             self.scale,
         );
@@ -122,7 +127,9 @@ impl ImguiRenderLoop for NightreignStyleHud {
                 draw_ironeye_precision_reticle_active(ui, &self.icons.ironeye, self.scale);
             }
             draw_recluse_blood_debug(self.charges.recluse_blood_debug(), self.scale);
-            draw_wylder_hookshot_map_probe_debug(self.scale);
+            if WYLDER_HOOKSHOT_NATIVE_DIAGNOSTICS_ENABLED {
+                draw_wylder_hookshot_map_probe_debug(self.scale);
+            }
             return;
         };
         let role = snapshot.role;
@@ -240,7 +247,9 @@ impl ImguiRenderLoop for NightreignStyleHud {
             draw_scholar_damage_numbers(ui, &snapshot, self.scale);
         }
         draw_recluse_blood_debug(snapshot.recluse_blood_debug, self.scale);
-        draw_wylder_hookshot_map_probe_debug(self.scale);
+        if WYLDER_HOOKSHOT_NATIVE_DIAGNOSTICS_ENABLED {
+            draw_wylder_hookshot_map_probe_debug(self.scale);
+        }
         draw_charge_slot(
             ui,
             ultimate_center,
