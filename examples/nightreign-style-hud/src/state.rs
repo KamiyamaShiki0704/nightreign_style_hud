@@ -61,7 +61,6 @@ struct TeammateResurrectionAccumulationSnapshot {
 enum WylderHookshotNativeResult {
     PullEnemy,
     PullToEnemy,
-    PullToMap,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +89,92 @@ impl WylderHookshotMovementDestination {
             Self::Enemy(_) => WYLDER_HOOKSHOT_STOP_ENEMY_DISTANCE,
             Self::Point(_) => WYLDER_HOOKSHOT_STOP_MAP_DISTANCE,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WylderHookshotCapsule {
+    height: f32,
+    radius: f32,
+}
+
+fn wylder_hookshot_capsule_from_values(
+    chr_hit_height: f32,
+    chr_hit_radius: f32,
+    hit_height: f32,
+    hit_radius: f32,
+) -> Option<WylderHookshotCapsule> {
+    let valid = |height: f32, radius: f32| {
+        height.is_finite()
+            && radius.is_finite()
+            && (WYLDER_HOOKSHOT_CAPSULE_MIN_HEIGHT..=WYLDER_HOOKSHOT_CAPSULE_MAX_HEIGHT)
+                .contains(&height)
+            && (WYLDER_HOOKSHOT_CAPSULE_MIN_RADIUS..=WYLDER_HOOKSHOT_CAPSULE_MAX_RADIUS)
+                .contains(&radius)
+    };
+    if valid(chr_hit_height, chr_hit_radius) {
+        return Some(WylderHookshotCapsule {
+            height: chr_hit_height,
+            radius: chr_hit_radius,
+        });
+    }
+    valid(hit_height, hit_radius).then_some(WylderHookshotCapsule {
+        height: hit_height,
+        radius: hit_radius,
+    })
+}
+
+fn wylder_hookshot_chr_capsule(chr: &ChrIns) -> Option<WylderHookshotCapsule> {
+    let physics = chr.modules.as_ref().physics.as_ref();
+    wylder_hookshot_capsule_from_values(
+        physics.chr_hit_height,
+        physics.chr_hit_radius,
+        physics.hit_height,
+        physics.hit_radius,
+    )
+}
+
+fn wylder_hookshot_capsules_touch(
+    player_position: HavokPosition,
+    player_capsule: WylderHookshotCapsule,
+    target_position: HavokPosition,
+    target_capsule: WylderHookshotCapsule,
+) -> bool {
+    if !havok_position_is_finite(&player_position)
+        || !havok_position_is_finite(&target_position)
+    {
+        return false;
+    }
+
+    let dx = player_position.0 - target_position.0;
+    let dz = player_position.2 - target_position.2;
+    let horizontal_limit =
+        player_capsule.radius + target_capsule.radius + WYLDER_HOOKSHOT_STOP_CAPSULE_MARGIN;
+    let vertical_limit = (player_capsule.height + target_capsule.height) * 0.5
+        + WYLDER_HOOKSHOT_STOP_VERTICAL_MARGIN;
+    dx * dx + dz * dz <= horizontal_limit * horizontal_limit
+        && (player_position.1 - target_position.1).abs() <= vertical_limit
+}
+
+fn wylder_hookshot_close_enough(
+    destination: WylderHookshotMovementDestination,
+    player_position: HavokPosition,
+    target_position: HavokPosition,
+    player_capsule: Option<WylderHookshotCapsule>,
+    target_capsule: Option<WylderHookshotCapsule>,
+) -> bool {
+    match (destination, player_capsule, target_capsule) {
+        (
+            WylderHookshotMovementDestination::Enemy(_),
+            Some(player_capsule),
+            Some(target_capsule),
+        ) => wylder_hookshot_capsules_touch(
+            player_position,
+            player_capsule,
+            target_position,
+            target_capsule,
+        ),
+        _ => distance_havok(player_position, target_position) <= destination.stop_distance(),
     }
 }
 
@@ -163,6 +248,8 @@ impl WylderHookshotMovementStopDetector {
         &mut self,
         player_position: HavokPosition,
         target_position: Option<HavokPosition>,
+        player_capsule: Option<WylderHookshotCapsule>,
+        target_capsule: Option<WylderHookshotCapsule>,
         now: Instant,
     ) -> bool {
         if !self.active || self.emitted {
@@ -206,7 +293,13 @@ impl WylderHookshotMovementStopDetector {
             .started_at
             .map(|started| now.saturating_duration_since(started).as_secs_f32())
             .unwrap_or(0.0);
-        let close_enough = distance <= destination.stop_distance();
+        let close_enough = wylder_hookshot_close_enough(
+            destination,
+            player_position,
+            target_position,
+            player_capsule,
+            target_capsule,
+        );
         let passed_destination = travelled >= WYLDER_HOOKSHOT_STOP_MIN_TRAVEL_DISTANCE
             && (crossed_target_plane || rebounded);
         if elapsed < WYLDER_HOOKSHOT_STOP_GRACE_SECONDS
@@ -223,7 +316,6 @@ impl WylderHookshotMovementStopDetector {
 #[derive(Default)]
 struct WylderHookshotNativeResolver {
     active: bool,
-    pending_map_updates: u8,
     result: Option<WylderHookshotNativeResult>,
 }
 
@@ -236,7 +328,6 @@ impl WylderHookshotNativeResolver {
         &mut self,
         active: bool,
         enemy_result: Option<WylderHookshotNativeResult>,
-        native_map_hit: bool,
     ) -> Option<WylderHookshotNativeResult> {
         if !active {
             *self = Self::default();
@@ -244,30 +335,15 @@ impl WylderHookshotNativeResolver {
         }
         if !self.active {
             self.active = true;
-            self.pending_map_updates = 0;
             self.result = None;
         }
         if self.result.is_some() {
             return None;
         }
 
-        if let Some(result @ (WylderHookshotNativeResult::PullEnemy
-        | WylderHookshotNativeResult::PullToEnemy)) = enemy_result
-        {
-            self.pending_map_updates = 0;
+        if let Some(result) = enemy_result {
             self.result = Some(result);
             return Some(result);
-        }
-
-        if self.pending_map_updates > 0 {
-            self.pending_map_updates -= 1;
-            if self.pending_map_updates == 0 {
-                self.result = Some(WylderHookshotNativeResult::PullToMap);
-                return self.result;
-            }
-        } else if native_map_hit {
-            // Give the target HKS one game update to publish an enemy result.
-            self.pending_map_updates = 1;
         }
         None
     }
@@ -318,7 +394,6 @@ struct ChargeState {
     wylder_hookshot_aim_target: Option<WylderSkillLockTarget>,
     wylder_hookshot_native: WylderHookshotNativeResolver,
     wylder_hookshot_target: Option<FieldInsHandle>,
-    wylder_hookshot_map_contact: Option<WylderHookshotMapContact>,
     wylder_hookshot_movement_stop: WylderHookshotMovementStopDetector,
     revenant_skill_move_hud: bool,
     revenant_active_summon: Option<usize>,
@@ -433,7 +508,6 @@ impl ChargeState {
             wylder_hookshot_aim_target: None,
             wylder_hookshot_native: WylderHookshotNativeResolver::default(),
             wylder_hookshot_target: None,
-            wylder_hookshot_map_contact: None,
             wylder_hookshot_movement_stop: WylderHookshotMovementStopDetector::default(),
             revenant_skill_move_hud: false,
             revenant_active_summon: None,
@@ -1441,23 +1515,13 @@ impl ChargeState {
         active_effects: &[i32],
     ) {
         let active = active_effects.contains(&SP_WYLDER_HOOKSHOT_RESOLVE_ACTIVE);
-        set_wylder_hookshot_map_probe_visible(active);
-        set_wylder_hookshot_player_chr(
-            world_chr_man
-                .main_player
-                .as_ref()
-                .map(|player| &player.chr_ins),
-        );
         let started = active && !self.wylder_hookshot_native.active;
         if started {
             self.wylder_hookshot_target = None;
-            self.wylder_hookshot_map_contact = None;
-            clear_wylder_hookshot_map_contact();
             clear_wylder_hookshot_player_outputs(world_chr_man);
         }
         if !active {
-            clear_wylder_hookshot_map_contact();
-            self.wylder_hookshot_native.update(false, None, false);
+            self.wylder_hookshot_native.update(false, None);
             clear_wylder_hookshot_player_outputs(world_chr_man);
             return;
         }
@@ -1465,32 +1529,15 @@ impl ChargeState {
             return;
         }
 
-        let native_map_contact = take_wylder_hookshot_map_contact();
-        let hks_map_pulse = active_effects.contains(&SP_WYLDER_HOOKSHOT_MAP_BOUND_PULSE);
-        let native_map_hit = native_map_contact.is_some() || hks_map_pulse;
-        if let Some(contact) = native_map_contact {
-            self.wylder_hookshot_map_contact = Some(contact);
-        }
         let enemy = active
             .then(|| wylder_hookshot_target_result(world_chr_man))
             .flatten();
-        let emitted = self.wylder_hookshot_native.update(
-            active,
-            enemy.map(|(_, result)| result),
-            native_map_hit,
-        );
-
-        if hks_map_pulse {
-            if let Some(player) = world_chr_man.main_player.as_mut() {
-                player
-                    .chr_ins
-                    .remove_speffect(SP_WYLDER_HOOKSHOT_MAP_BOUND_PULSE);
-            }
-        }
+        let emitted = self
+            .wylder_hookshot_native
+            .update(active, enemy.map(|(_, result)| result));
 
         if let Some((handle, _)) = enemy {
             self.wylder_hookshot_target = Some(handle);
-            self.wylder_hookshot_map_contact = None;
             if let Some(target) = world_chr_man.chr_ins_by_handle_mut(&handle) {
                 target.remove_speffect(SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED);
                 target.remove_speffect(SP_WYLDER_HOOKSHOT_IMPACT_REJECTED);
@@ -1507,7 +1554,6 @@ impl ChargeState {
         let output = match result {
             WylderHookshotNativeResult::PullEnemy => SP_WYLDER_HOOKSHOT_PULL_ENEMY,
             WylderHookshotNativeResult::PullToEnemy => SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY,
-            WylderHookshotNativeResult::PullToMap => SP_WYLDER_HOOKSHOT_PULL_TO_MAP,
         };
         player.apply_speffect(output, true);
     }
@@ -1531,16 +1577,20 @@ impl ChargeState {
             }
             if was_active {
                 self.wylder_hookshot_target = None;
-                self.wylder_hookshot_map_contact = None;
                 self.wylder_hookshot_aim_target = None;
             }
             return;
         }
 
-        let Some(player_position) = world_chr_man
+        let Some((player_position, player_capsule)) = world_chr_man
             .main_player
             .as_ref()
-            .map(|player| scholar_chr_physics_position(&player.chr_ins))
+            .map(|player| {
+                (
+                    scholar_chr_physics_position(&player.chr_ins),
+                    wylder_hookshot_chr_capsule(&player.chr_ins),
+                )
+            })
         else {
             self.wylder_hookshot_movement_stop.reset();
             return;
@@ -1562,15 +1612,23 @@ impl ChargeState {
             );
         }
 
-        let target_position = self
+        let target = self
             .wylder_hookshot_movement_stop
             .destination
             .and_then(|destination| {
-                wylder_hookshot_destination_position(world_chr_man, destination)
+                wylder_hookshot_destination_sample(world_chr_man, destination)
             });
+        let target_position = target.map(|(position, _)| position);
+        let target_capsule = target.and_then(|(_, capsule)| capsule);
         if !self
             .wylder_hookshot_movement_stop
-            .sample(player_position, target_position, now)
+            .sample(
+                player_position,
+                target_position,
+                player_capsule,
+                target_capsule,
+                now,
+            )
         {
             return;
         }
@@ -1597,20 +1655,14 @@ impl ChargeState {
         let resolved_enemy = self
             .wylder_hookshot_target
             .map(WylderHookshotMovementDestination::Enemy);
-        let resolved_map = self.wylder_hookshot_map_contact.map(|contact| {
-            WylderHookshotMovementDestination::Point(contact.position)
-        });
 
         if active_effects.contains(&SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY) {
             return resolved_enemy.or(aimed_enemy);
         }
         if active_effects.contains(&SP_WYLDER_HOOKSHOT_PULL_TO_MAP) {
-            return resolved_map.or(aimed_map);
+            return aimed_map;
         }
-        resolved_enemy
-            .or(resolved_map)
-            .or(aimed_enemy)
-            .or(aimed_map)
+        resolved_enemy.or(aimed_enemy)
     }
 
     fn update_ironeye_weakness(
@@ -4197,15 +4249,20 @@ fn wylder_hookshot_target_result(
     None
 }
 
-fn wylder_hookshot_destination_position(
+fn wylder_hookshot_destination_sample(
     world_chr_man: &WorldChrMan,
     destination: WylderHookshotMovementDestination,
-) -> Option<HavokPosition> {
+) -> Option<(HavokPosition, Option<WylderHookshotCapsule>)> {
     match destination {
         WylderHookshotMovementDestination::Enemy(handle) => world_chr_man
             .chr_ins_by_handle(&handle)
-            .map(scholar_chr_physics_position),
-        WylderHookshotMovementDestination::Point(position) => Some(position),
+            .map(|target| {
+                (
+                    scholar_chr_physics_position(target),
+                    wylder_hookshot_chr_capsule(target),
+                )
+            }),
+        WylderHookshotMovementDestination::Point(position) => Some((position, None)),
     }
 }
 
@@ -4216,8 +4273,6 @@ fn clear_wylder_hookshot_player_outputs(world_chr_man: &mut WorldChrMan) {
     for output in [
         SP_WYLDER_HOOKSHOT_PULL_ENEMY,
         SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY,
-        SP_WYLDER_HOOKSHOT_PULL_TO_MAP,
-        SP_WYLDER_HOOKSHOT_MAP_BOUND_PULSE,
     ] {
         player.chr_ins.remove_speffect(output);
     }
@@ -4795,27 +4850,16 @@ mod revenant_active_effect_tests {
     }
 
     #[test]
-    fn hookshot_enemy_result_preempts_pending_map_contact() {
+    fn hookshot_first_enemy_result_is_latched_once() {
         let mut resolver = WylderHookshotNativeResolver::default();
-        assert_eq!(resolver.update(true, None, true), None);
+        assert_eq!(resolver.update(true, None), None);
         assert_eq!(
-            resolver.update(
-                true,
-                Some(WylderHookshotNativeResult::PullToEnemy),
-                false,
-            ),
+            resolver.update(true, Some(WylderHookshotNativeResult::PullToEnemy)),
             Some(WylderHookshotNativeResult::PullToEnemy)
         );
-        assert_eq!(resolver.update(true, None, false), None);
-    }
-
-    #[test]
-    fn hookshot_map_contact_is_deferred_one_update() {
-        let mut resolver = WylderHookshotNativeResolver::default();
-        assert_eq!(resolver.update(true, None, true), None);
         assert_eq!(
-            resolver.update(true, None, false),
-            Some(WylderHookshotNativeResult::PullToMap)
+            resolver.update(true, Some(WylderHookshotNativeResult::PullEnemy)),
+            None
         );
     }
 
@@ -4823,18 +4867,13 @@ mod revenant_active_effect_tests {
     fn hookshot_inactive_edge_resets_the_previous_result() {
         let mut resolver = WylderHookshotNativeResolver::default();
         assert_eq!(
-            resolver.update(
-                true,
-                Some(WylderHookshotNativeResult::PullEnemy),
-                false,
-            ),
+            resolver.update(true, Some(WylderHookshotNativeResult::PullEnemy)),
             Some(WylderHookshotNativeResult::PullEnemy)
         );
-        assert_eq!(resolver.update(false, None, false), None);
-        assert_eq!(resolver.update(true, None, true), None);
+        assert_eq!(resolver.update(false, None), None);
         assert_eq!(
-            resolver.update(true, None, false),
-            Some(WylderHookshotNativeResult::PullToMap)
+            resolver.update(true, Some(WylderHookshotNativeResult::PullToEnemy)),
+            Some(WylderHookshotNativeResult::PullToEnemy)
         );
     }
 }
@@ -4842,8 +4881,9 @@ mod revenant_active_effect_tests {
 #[cfg(test)]
 mod wylder_hookshot_movement_stop_tests {
     use super::{
-        HavokPosition, WylderHookshotMovementDestination,
-        WylderHookshotMovementStopDetector,
+        HavokPosition, WylderHookshotCapsule, WylderHookshotMovementDestination,
+        WylderHookshotMovementStopDetector, wylder_hookshot_capsule_from_values,
+        wylder_hookshot_capsules_touch,
     };
     use std::time::{Duration, Instant};
 
@@ -4861,11 +4901,15 @@ mod wylder_hookshot_movement_stop_tests {
         assert!(!detector.sample(
             HavokPosition::from_xyz(9.2, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(40),
         ));
         assert!(detector.sample(
             HavokPosition::from_xyz(9.2, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(100),
         ));
     }
@@ -4884,16 +4928,22 @@ mod wylder_hookshot_movement_stop_tests {
         assert!(!detector.sample(
             HavokPosition::from_xyz(0.0, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now,
         ));
         assert!(!detector.sample(
             HavokPosition::from_xyz(8.0, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(100),
         ));
         assert!(detector.sample(
             HavokPosition::from_xyz(11.5, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(120),
         ));
     }
@@ -4912,16 +4962,22 @@ mod wylder_hookshot_movement_stop_tests {
         assert!(!detector.sample(
             HavokPosition::from_xyz(0.0, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now,
         ));
         assert!(!detector.sample(
             HavokPosition::from_xyz(8.0, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(100),
         ));
         assert!(detector.sample(
             HavokPosition::from_xyz(7.7, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(120),
         ));
     }
@@ -4942,12 +4998,80 @@ mod wylder_hookshot_movement_stop_tests {
         assert!(detector.sample(
             HavokPosition::from_xyz(0.6, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(100),
         ));
         assert!(!detector.sample(
             HavokPosition::from_xyz(0.8, 0.0, 0.0),
             Some(target),
+            None,
+            None,
             now + Duration::from_millis(120),
+        ));
+    }
+
+    #[test]
+    fn npc_chr_capsule_values_take_priority_with_hit_capsule_fallback() {
+        assert_eq!(
+            wylder_hookshot_capsule_from_values(1.9, 0.4, 3.0, 0.8),
+            Some(WylderHookshotCapsule {
+                height: 1.9,
+                radius: 0.4,
+            })
+        );
+        assert_eq!(
+            wylder_hookshot_capsule_from_values(f32::NAN, 0.0, 3.0, 0.8),
+            Some(WylderHookshotCapsule {
+                height: 3.0,
+                radius: 0.8,
+            })
+        );
+        assert_eq!(
+            wylder_hookshot_capsule_from_values(f32::NAN, 0.0, f32::INFINITY, -1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn capsule_contact_scales_with_enemy_radius_and_requires_vertical_overlap() {
+        let player = WylderHookshotCapsule {
+            height: 1.9,
+            radius: 0.4,
+        };
+        let small_enemy = WylderHookshotCapsule {
+            height: 1.9,
+            radius: 0.4,
+        };
+        let large_enemy = WylderHookshotCapsule {
+            height: 5.0,
+            radius: 2.5,
+        };
+        let origin = HavokPosition::from_xyz(0.0, 0.0, 0.0);
+
+        assert!(wylder_hookshot_capsules_touch(
+            origin,
+            player,
+            HavokPosition::from_xyz(0.99, 0.0, 0.0),
+            small_enemy,
+        ));
+        assert!(!wylder_hookshot_capsules_touch(
+            origin,
+            player,
+            HavokPosition::from_xyz(1.05, 0.0, 0.0),
+            small_enemy,
+        ));
+        assert!(wylder_hookshot_capsules_touch(
+            origin,
+            player,
+            HavokPosition::from_xyz(3.0, 0.0, 0.0),
+            large_enemy,
+        ));
+        assert!(!wylder_hookshot_capsules_touch(
+            origin,
+            player,
+            HavokPosition::from_xyz(0.5, 2.2, 0.0),
+            small_enemy,
         ));
     }
 }

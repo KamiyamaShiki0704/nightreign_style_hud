@@ -157,9 +157,10 @@ runtime writes `880005` for ultimate readiness.
   - No valid target falls back to a red center reticle.
   - The reticle attaches to the selected enemy or ray-hit point and scales by
     distance: close targets are larger, far targets are smaller.
-- Native hookshot hit resolution:
+- Enemy hookshot hit resolution:
   - Keep `883120` on the player for the complete hook collision/settlement
-    window; removing it resets the attempt and clears all result outputs.
+    window; removing it resets the enemy attempt and clears only the DLL-owned
+    enemy outputs `883124/883125`.
   - The normal enemy-hit Atk must attach `883121` to its target and use damage
     level 2. Target `c9997` consumes that marker and emits `883122` when damage
     motion is accepted or `883123` when it is rejected.
@@ -167,39 +168,16 @@ runtime writes `880005` for ultimate readiness.
     pulled by the Atk's `knockback_dist`.
   - Player output `883125` means the enemy rejected the impact and the player
     should branch into pull-to-enemy behavior.
-  - Player output `883126` is reserved for a proven map-only collision with no
-    enemy result in the arbitration update.
-  - Use Bullet `30910000` as a stationary, short-lived map sensor emitted from
-    the hook attack point during its active frames. Configure its map impact to
-    create child Bullet `30910001`; the DLL observes only that child as the map
-    receipt and uses its spawn position as the pull destination.
-  - Both `30910000` and `30910001` are excluded from multi-lock retargeting and
-    cloning. A receipt is accepted only while player input `883120` is active
-    and only when the child owner is the local player or a player-owned parent
-    Bullet. Enemy-owned and other players' receipts are ignored.
-  - Configure the sensor so characters are penetrated and map collision ends
-    it. Empty-space lifetime expiry must not create `30910001`; otherwise a
-    miss would be misclassified as a wall hit.
-  - A valid `30910001` receipt enters the existing one-update arbitration
-    delay. Target `883122/883123` always wins if it appears during that delay.
-  - Only the first valid `30910001` is accepted during one continuous `883120`
-    activation. Later receipts return through an atomic fast path without
-    resolving the world, parent Bullet, or shared contact slot. Removing and
-    reapplying `883120` rearms the next hookshot attempt.
-  - The first candidate native dispatcher at Elden Ring 2.6.2 RVA `0x44BA40`
-    (`0x44BFA0` on 2.7.0.0) did not emit this output for player AtkParam
-    `498210`, even after its hit type was changed to `3`; it remains diagnostic
-    rather than required by the Bullet route.
-  - The old `[DEBUG-wylder-map-a41c]`, AtkParam-lookup, and generic impact
-    probes are disabled in normal builds. They were observational only and
-    never authorized `883124..883126`; leaving their global detours active
-    added unnecessary work during the hookshot window.
-  - Internal pulse `883127` belongs to the disproven player-`c0000` experiment
-    and is no longer required for native map detection. It remains accepted by
-    the resolver temporarily for compatibility and must not be used as an
-    action branch or applied manually.
-  - Enemy results always take priority over map contact. The held-skill HUD's
-    line-of-sight ray is visual preview only and never authorizes these outputs.
+  - The first accepted/rejected target marker is retained as the moving enemy
+    destination. The target markers are removed after consumption and the
+    first emitted enemy result is latched for the rest of that `883120` window.
+  - Map collision and the map-vs-enemy action branch are entirely
+    parameter/HKS-owned. External `883126` may identify a map-pull branch, but
+    the DLL never creates, consumes, or clears it.
+  - The DLL contains no hookshot-specific Bullet IDs, Bullet throttling,
+    construction suppression, map-collision detours, Atk lookup probes, or map
+    debug overlay. Its shared Bullet hook is again a passive jump-back callback
+    used only by the independent multi-lock feature.
 - Pull-movement stop detection:
   - Apply and maintain player input `883128` only while the HKS/TAE pull
     movement is actually running. This input does not start movement and the
@@ -208,18 +186,23 @@ runtime writes `880005` for ultimate readiness.
     passes its destination. HKS should detect `883129`, branch to the movement
     stop/break action, and remove `883128` as that branch begins.
   - Enemy pulls retain the resolved enemy handle and follow its live physics
-    position. Map pulls freeze the proven native contact when available;
-    otherwise the held-skill wall point is used only as the destination of an
-    already-authorized movement.
-  - Current stop distances are `1.50` game units for an enemy and `0.90` for a
-    fixed map point. A short `0.08s` startup grace prevents an immediate break.
-    Crossing the target plane or moving away after the closest approach also
-    emits the stop request so a large animation frame step cannot skip it.
+    position. Their near test uses both characters' live NpcParam-loaded
+    `chr_hit_radius/chr_hit_height` capsules (falling back to
+    `hit_radius/hit_height`), so large enemies stop farther out and small
+    enemies can be approached more closely. The horizontal surface margin is
+    `0.20`; vertical capsule overlap uses a `0.25` tolerance. Invalid runtime
+    capsule data falls back to the previous `1.50` center distance.
+  - For an externally authorized `883126` map branch, the DLL may reuse the
+    held-skill HUD's retained wall point only as a stop destination. It does not
+    treat that ray as proof that the hook hit the map. The fixed point threshold
+    remains `0.90`.
+  - A short `0.08s` startup grace prevents an immediate break. Crossing the
+    target plane or moving away after the closest approach also emits the stop
+    request so a large animation frame step cannot skip it.
   - `883129` is emitted at most once per `883128` activation and is removed
     when `883128` ends. No valid destination means no stop output.
   - Neither `883128` nor `883129` authorizes `883126` or chooses the
-    enemy-vs-map branch. Native map-hit authorization remains a separate,
-    unresolved investigation.
+    enemy-vs-map branch; those decisions remain parameter/HKS-owned.
 
 ### Guardian
 
