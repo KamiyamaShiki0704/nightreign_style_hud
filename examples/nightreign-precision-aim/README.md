@@ -1,6 +1,21 @@
 # Nightreign Precision Aim
 
-Standalone DLL for the Ironeye-style precision aiming camera and reticle.
+Standalone DLL for the Nightreign/Ironeye-style bow precision-aim camera and
+custom reticle.
+
+## Game Compatibility
+
+This build uses the workspace's pinned `fromsoftware-rs` compatibility commit:
+
+```text
+f96aa78e26d51838c31c411e05a41834631d54d5
+```
+
+The binding layer explicitly supports Elden Ring `2.7.0.0` (Worldwide) and
+`2.7.0.1` (Japanese). The standalone crate contains no fixed game RVA of its
+own; singleton and task addresses are selected by that versioned binding
+layer. Unknown executable versions are rejected rather than using guessed
+addresses.
 
 ## Activation
 
@@ -18,21 +33,49 @@ The DLL is independent of role marker Speffects.
 
 The reticle uses three PNG layers:
 
-- `Ironeye_Reticle1.png`
-- `Ironeye_Reticle2.png`
-- `Ironeye_Reticle3.png`
+- `Precision_Reticle1.png`
+- `Precision_Reticle2.png`
+- `Precision_Reticle3.png`
 
 At runtime the DLL tries to load these from an `assets` folder next to the DLL.
-If a PNG is missing or invalid, the embedded default compiled into the DLL is
-used for that layer.
+For each layer it falls back to the matching `Ironeye_ReticleN.png`, and then
+to the embedded default compiled into the DLL if both external files are
+missing or invalid.
 
 For customization, keep the DLL and the `assets` folder together, then replace
-the three PNGs with files of the same names. Square 256x256 PNGs are recommended.
+the three `Precision_ReticleN.png` files. Square 256x256 PNGs are recommended.
+
+## Installation
+
+Keep the DLL and its private assets together:
+
+```text
+nightreign_precision_aim/
+|-- nightreign_precision_aim.dll
+`-- assets/
+    |-- Precision_Reticle1.png
+    |-- Precision_Reticle2.png
+    |-- Precision_Reticle3.png
+    |-- Ironeye_Reticle1.png
+    |-- Ironeye_Reticle2.png
+    `-- Ironeye_Reticle3.png
+```
+
+The `Ironeye_` files are packaged fallback/default layers. User overrides
+should normally use the `Precision_` names.
+
+## Coexistence with Nightreign Style HUD
+
+`nightreign_style_hud.dll` already provides the same `883100` precision-aim
+runtime. When the full HUD DLL is present, this standalone DLL deliberately
+does not initialize a second task/ImGui runtime; the full HUD handles the
+feature instead. Disable the full HUD when validating this DLL by itself and
+when testing this folder's private reticle assets.
 
 ## Build
 
 ```powershell
-cargo build --package nightreign-precision-aim --release --target x86_64-pc-windows-msvc
+cargo build --package nightreign-precision-aim --release --target x86_64-pc-windows-msvc --locked
 ```
 
 Build output:
@@ -40,3 +83,6 @@ Build output:
 ```text
 target\x86_64-pc-windows-msvc\release\nightreign_precision_aim.dll
 ```
+
+The workspace target configuration links the Microsoft C runtime statically,
+so the release DLL does not require a separately installed dynamic MSVC CRT.
