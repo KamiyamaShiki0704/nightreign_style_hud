@@ -14,13 +14,19 @@ from [KamiyamaShiki0704/fromsoftware-rs](https://github.com/KamiyamaShiki0704/fr
 and pinned to the immutable compatibility commit:
 
 ```text
-f96aa78e26d51838c31c411e05a41834631d54d5
+3c8c1d7633a99309fb004c9f894ea10b7967d0e0
 ```
 
 They are deliberately not vendored into this repository. `Cargo.lock` records
 the same resolved commit, so builds do not follow a moving branch or tag.
 
 ## Build
+
+Main HUD and standalone [Precision Aim](examples/nightreign-precision-aim/README.md)
+packages are available together on this repository's
+[Releases page](https://github.com/KamiyamaShiki0704/nightreign_style_hud/releases).
+The standalone package includes its private `assets` folder. Preserve your
+custom PNGs when updating; neither package requires a second repository.
 
 ```powershell
 cargo build --package nightreign-style-hud --release --target x86_64-pc-windows-msvc
@@ -40,8 +46,14 @@ addresses:
 
 | Region | Executable version |
 | --- | --- |
-| Worldwide | `2.6.2.0`, `2.7.0.0` |
+| Worldwide | `2.6.2.0`, `2.7.0.0`, `2.7.1.0` |
 | Japanese | `2.6.2.1`, `2.7.0.1` |
+
+Worldwide executable `2.7.1.0` corresponds to game patch **1.17.1**. Its
+separate mapping retains the previous layouts and updates the five verified
+task/raycast/debug-draw entry points. New Japanese 1.17.1 mappings are not
+assumed without a verified executable. See the
+[compatibility audit](docs/compatibility/er-1.17.1-20260908.md).
 
 ## Runtime Overview
 
@@ -388,9 +400,53 @@ runtime writes `880005` for ultimate readiness.
   - Cancel: `880914`.
   - Normal duration: 8s.
   - Enhanced duration: 15s.
+  - Successful normal/enhanced activation applies player buff `880920`/`880921`
+    once, respectively. Their supplied Param rows last 8s/15s and are neutral
+    templates; define the actual stat bonuses in parameters. The DLL does not
+    refresh these buffs each frame. Cancel, natural expiry, and role cleanup
+    remove both buffs and any pending dodge pulse.
   - When the skill duration auto-ends, DLL applies `880915`.
+  - Auto-dodge requires the internal enhanced 15s state AND live player buff
+    `880921`. An accepted pre-hit sensor contact applies player pulse `880922`
+    (0.5s) and rejects that early contact before the normal hit pipeline. HKS
+    must consume `880922` and choose the actual dodge event/animation; the DLL
+    does not dispatch a behavior event directly. Removing `880921` disables
+    auto-dodge without reapplying the buff; the original HUD/cooldown timer
+    remains unchanged. Import the new rows before testing.
+  - Each accepted dodge additionally reads the incoming attack's
+    `atkDir_forSfx` from its own `AtkParam_Npc` or `AtkParam_Pc` entry.
+    Direction outputs are player SpEffects, not effects on the attacker:
+
+    | `atkDir_forSfx` | Param direction | Additional player SpEffect |
+    | --- | --- | --- |
+    | `0` | Front | `880930` |
+    | `1` | Top | `880931` |
+    | `2` | Bottom | `880932` |
+    | `3` | Left | `880933` |
+    | `4` | Right | `880934` |
+
+    `880922` remains the common request for every dodge. A known direction
+    applies exactly one additional marker **before** `880922`; unknown values
+    or missing attack data produce only `880922`. Both kinds of output last
+    0.5s in the supplied CSV. Import `880930..880934` from
+    [Param_csv/Speffect.csv](Param_csv/Speffect.csv) into active Regulation.
+    When HKS handles `880922`, inspect the direction marker first, select your
+    animation, and clear the request and direction markers after consuming
+    them. Existing HKS handling only `880922` continues to work.
+
+    Previous request/direction outputs are removed before a new request, on
+    cancel/expiry, role cleanup, or detection of a removed enhanced buff.
+    Only the first queued contact chooses the direction; subsequent contacts
+    cannot overwrite it. This is the attack's **parameter direction**, not
+    the attacker's world-space bearing and not the direction to dodge toward.
+    The DLL keeps only the contact's table/ID and performs one indexed lookup
+    on behavior processing, with no per-frame attack-table scan. Sensor range,
+    suppression and rearm remain 0.40m, 650ms and 900ms respectively.
 - Ultimate:
   - Discounted use supported.
+  - Use shared notifications `880021`/`880022`. The old Undertaker aliases
+    `880921`/`880922` are no longer ultimate inputs because those IDs now belong
+    to the enhanced skill buff and auto-dodge pulse.
   - Free ultimate trigger: `880916`.
   - Free ultimate window: 4s.
 

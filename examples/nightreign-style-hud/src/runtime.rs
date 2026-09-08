@@ -125,6 +125,7 @@ fn install_ironeye_runtime_tasks_once() {
 }
 
 fn ironeye_pre_behavior_task(_: &FD4TaskData) {
+    update_undertaker_auto_dodge_before_behavior();
     restore_ironeye_precision_before_behavior();
 }
 

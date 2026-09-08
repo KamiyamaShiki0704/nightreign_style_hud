@@ -410,6 +410,7 @@ struct ChargeState {
     revenant_map_refresh_cleanup_pending: bool,
     revenant_converted_souls: HashMap<u32, RevenantConvertedSoul>,
     revenant_debug_souls: Vec<RevenantDebugSoul>,
+    revenant_pending_debug_soul: Option<RevenantPendingDebugSoul>,
     revenant_seen_deaths: HashSet<FieldInsHandle>,
     resurrection_accumulation: ResurrectionAccumulationSnapshot,
     teammate_resurrection_accumulations: Vec<TeammateResurrectionAccumulationSnapshot>,
@@ -440,8 +441,16 @@ struct RevenantDebugSoul {
     expires_at: Instant,
     requested_at: Instant,
     handle: Option<FieldInsHandle>,
+    creator_request_pending: bool,
+    npc_id: i32,
     npc_param_id: i32,
     hide_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct RevenantPendingDebugSoul {
+    candidate: RevenantPassiveCandidate,
+    ready_at: Instant,
 }
 
 impl DuchessReplaySnapshot {
@@ -524,6 +533,7 @@ impl ChargeState {
             revenant_map_refresh_cleanup_pending: false,
             revenant_converted_souls: HashMap::new(),
             revenant_debug_souls: Vec::new(),
+            revenant_pending_debug_soul: None,
             revenant_seen_deaths: HashSet::new(),
             resurrection_accumulation: ResurrectionAccumulationSnapshot::default(),
             teammate_resurrection_accumulations: Vec::new(),
@@ -611,6 +621,7 @@ impl ChargeState {
         }
 
         let Some(role) = role else {
+            set_undertaker_auto_dodge_armed(false);
             ULTIMATE_DAMAGE_EVENTS.store(0, Ordering::Relaxed);
             self.scholar_sympathy_hp.clear();
             self.scholar_damage_numbers.clear();
@@ -684,6 +695,12 @@ impl ChargeState {
             now,
         );
         self.sync_output_speffects(player, config);
+        set_undertaker_auto_dodge_armed(
+            config.role == Role::Undertaker
+                && self.undertaker_buff_end.is_some()
+                && self.undertaker_buff_duration >= UNDERTAKER_ENHANCED_BUFF_SECONDS
+                && chr_has_speffect(&player.chr_ins, SP_UNDERTAKER_ENHANCED_SKILL_BUFF),
+        );
 
         Some(self.snapshot(world_chr_man, config, action_pressed, now))
     }
@@ -744,6 +761,7 @@ impl ChargeState {
         self.revenant_map_refresh_cleanup_pending = false;
         self.revenant_converted_souls.clear();
         self.revenant_debug_souls.clear();
+        self.revenant_pending_debug_soul = None;
         self.revenant_seen_deaths.clear();
     }
 
@@ -1012,7 +1030,8 @@ impl ChargeState {
             }
             self.revenant_converted_souls.clear();
             self.update_revenant_debug_souls(world_chr_man, now);
-            self.try_spawn_revenant_debug_kills(world_chr_man, now);
+            self.submit_pending_revenant_debug_soul(world_chr_man, now);
+            self.try_queue_revenant_debug_kill(world_chr_man, now);
             return;
         }
 
@@ -1117,6 +1136,7 @@ impl ChargeState {
         for soul in self.revenant_debug_souls.drain(..) {
             release_revenant_debug_soul(world_chr_man, &soul);
         }
+        self.revenant_pending_debug_soul = None;
         self.revenant_seen_deaths.clear();
     }
 
@@ -1126,9 +1146,20 @@ impl ChargeState {
                 continue;
             }
             if soul.handle.is_none() {
+                if revenant_creator_request_consumed(
+                    soul.creator_request_pending,
+                    world_chr_man.debug_chr_creator.spawn,
+                ) {
+                    soul.creator_request_pending = false;
+                } else if soul.creator_request_pending {
+                    continue;
+                } else if world_chr_man.debug_chr_creator.spawn {
+                    continue;
+                }
+
                 if let Some(mut chr_ptr) = world_chr_man.debug_chr_creator.last_created_chr {
                     let chr = unsafe { chr_ptr.as_mut() };
-                    if chr.npc_param_id == soul.npc_param_id {
+                    if chr.npc_id == soul.npc_id && chr.npc_param_id == soul.npc_param_id {
                         prepare_revenant_debug_soul(chr);
                         request_revenant_debug_soul_animation(
                             chr,
@@ -1193,7 +1224,58 @@ impl ChargeState {
         }
     }
 
-    fn try_spawn_revenant_debug_kills(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
+    fn submit_pending_revenant_debug_soul(
+        &mut self,
+        world_chr_man: &mut WorldChrMan,
+        now: Instant,
+    ) {
+        let Some(pending) = self.revenant_pending_debug_soul else {
+            return;
+        };
+        let has_unbound_request = self
+            .revenant_debug_souls
+            .iter()
+            .any(|soul| soul.handle.is_none());
+        if !revenant_debug_spawn_submission_ready(
+            world_chr_man.debug_chr_creator.spawn,
+            has_unbound_request,
+            now,
+            pending.ready_at,
+        ) {
+            return;
+        }
+
+        if revenant_passive_candidate_validation(&pending.candidate).is_err() {
+            self.revenant_pending_debug_soul = None;
+            return;
+        }
+
+        let candidate = pending.candidate;
+        world_chr_man.spawn_debug_character(&ChrDebugSpawnRequest {
+            chr_id: candidate.npc_id,
+            chara_init_param_id: 0,
+            npc_param_id: candidate.npc_param_id,
+            npc_think_param_id: candidate.npc_think_param_id,
+            event_entity_id: 0,
+            talk_id: 0,
+            is_player: false,
+            pos_x: candidate.position.0,
+            pos_y: candidate.position.1,
+            pos_z: candidate.position.2,
+        });
+        self.revenant_debug_souls.push(RevenantDebugSoul {
+            expires_at: now + Duration::from_secs_f32(REVENANT_CONVERTED_SOUL_SECONDS),
+            requested_at: now,
+            handle: None,
+            creator_request_pending: true,
+            npc_id: candidate.npc_id,
+            npc_param_id: candidate.npc_param_id,
+            hide_at: None,
+        });
+        self.revenant_pending_debug_soul = None;
+    }
+
+    fn try_queue_revenant_debug_kill(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
         let Some(player_handle) = world_chr_man
             .main_player
             .as_ref()
@@ -1202,7 +1284,9 @@ impl ChargeState {
             return;
         };
 
-        if self.revenant_debug_souls.len() >= REVENANT_CONVERTED_SOUL_LIMIT {
+        if self.revenant_pending_debug_soul.is_some()
+            || self.revenant_debug_souls.len() >= REVENANT_CONVERTED_SOUL_LIMIT
+        {
             return;
         }
 
@@ -1227,28 +1311,24 @@ impl ChargeState {
                 continue;
             }
 
-            world_chr_man.debug_chr_creator.last_created_chr = None;
-            world_chr_man.spawn_debug_character(&ChrDebugSpawnRequest {
-                chr_id: candidate.npc_id,
-                chara_init_param_id: 0,
-                npc_param_id: candidate.npc_param_id,
-                npc_think_param_id: candidate.npc_think_param_id,
-                event_entity_id: 0,
-                talk_id: 0,
-                is_player: false,
-                pos_x: candidate.position.0,
-                pos_y: candidate.position.1,
-                pos_z: candidate.position.2,
-            });
-            self.revenant_debug_souls.push(RevenantDebugSoul {
-                expires_at: now + Duration::from_secs_f32(REVENANT_CONVERTED_SOUL_SECONDS),
-                requested_at: now,
-                handle: None,
-                npc_param_id: candidate.npc_param_id,
-                hide_at: None,
+            self.revenant_pending_debug_soul = Some(RevenantPendingDebugSoul {
+                candidate,
+                ready_at: now + REVENANT_DEBUG_SPAWN_DELAY,
             });
             break;
         }
+    }
+
+    fn begin_undertaker_skill(&mut self, enhanced: bool, now: Instant) -> i32 {
+        let (duration, effect) = if enhanced {
+            (UNDERTAKER_ENHANCED_BUFF_SECONDS, SP_UNDERTAKER_ENHANCED_SKILL_BUFF)
+        } else {
+            (UNDERTAKER_BUFF_SECONDS, SP_UNDERTAKER_NORMAL_SKILL_BUFF)
+        };
+        self.undertaker_buff_duration = duration;
+        self.undertaker_buff_end = Some(now + Duration::from_secs_f32(duration));
+        self.skill_layers = [1.0, 0.0];
+        effect
     }
 
     fn advance_skill(&mut self, config: &RoleConfig, now: Instant, delta: f32) {
@@ -1320,6 +1400,7 @@ impl ChargeState {
         config: &RoleConfig,
     ) {
         if config.role == Role::Undertaker && self.undertaker_auto_end_pending {
+            clear_undertaker_skill_effects(player);
             player.apply_speffect(config.effect(SP_UNDERTAKER_SKILL_AUTO_END), true);
             self.undertaker_auto_end_pending = false;
         }
@@ -2466,17 +2547,14 @@ impl ChargeState {
                     if skill_use_allowed || skill_cancel {
                         self.undertaker_buff_end = None;
                         self.skill_layers = [0.0, 0.0];
+                        clear_undertaker_skill_effects(player);
                     }
-                } else if skill_enhanced_use_allowed && self.skill_layers[0] >= 1.0 {
-                    self.undertaker_buff_duration = UNDERTAKER_ENHANCED_BUFF_SECONDS;
-                    self.undertaker_buff_end =
-                        Some(now + Duration::from_secs_f32(UNDERTAKER_ENHANCED_BUFF_SECONDS));
-                    self.skill_layers = [1.0, 0.0];
-                } else if skill_use_allowed && self.skill_layers[0] >= 1.0 {
-                    self.undertaker_buff_duration = UNDERTAKER_BUFF_SECONDS;
-                    self.undertaker_buff_end =
-                        Some(now + Duration::from_secs_f32(UNDERTAKER_BUFF_SECONDS));
-                    self.skill_layers = [1.0, 0.0];
+                } else if self.skill_layers[0] >= 1.0
+                    && (skill_enhanced_use_allowed || skill_use_allowed)
+                {
+                    let effect = self.begin_undertaker_skill(skill_enhanced_use_allowed, now);
+                    clear_undertaker_skill_effects(player);
+                    player.apply_speffect(effect, true);
                 }
             }
         }
@@ -3349,6 +3427,7 @@ const REVENANT_CONVERTED_SOUL_SPEFFECT: i32 = 295000;
 const REVENANT_CONVERTED_SOUL_APPEAR_ANIM_ID: i32 = 1830;
 const REVENANT_CONVERTED_SOUL_DISAPPEAR_ANIM_ID: i32 = 1840;
 const REVENANT_CONVERTED_SOUL_END_ANIM_SECONDS: f32 = 1.0;
+const REVENANT_DEBUG_SPAWN_DELAY: Duration = Duration::from_millis(100);
 const REVENANT_PASSIVE_BUDDY_ROUTE_ENABLED: bool = false;
 const REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID: i32 = -1;
 const REVENANT_PASSIVE_BUDDY_PARAM_IDS: [u32; REVENANT_CONVERTED_SOUL_LIMIT] = [
@@ -3404,13 +3483,55 @@ fn revenant_passive_candidate(
 
 fn revenant_enemy_think_param(chr: &ChrIns) -> Option<i32> {
     chr.as_subclass::<EnemyIns>()
-        .map(|enemy| enemy.npc_think_param)
+        .map(runtime_enemy_npc_think_param)
         .filter(|think_param| *think_param > 0)
+}
+
+fn revenant_debug_spawn_submission_ready(
+    creator_busy: bool,
+    has_unbound_request: bool,
+    now: Instant,
+    ready_at: Instant,
+) -> bool {
+    !creator_busy && !has_unbound_request && now >= ready_at
+}
+
+fn revenant_creator_request_consumed(request_pending: bool, creator_busy: bool) -> bool {
+    request_pending && !creator_busy
+}
+
+fn revenant_passive_candidate_validation(
+    candidate: &RevenantPassiveCandidate,
+) -> Result<(), &'static str> {
+    if !(1..=9999).contains(&candidate.npc_id)
+        || candidate.npc_param_id <= 0
+        || candidate.npc_think_param_id <= 0
+        || !candidate.position.0.is_finite()
+        || !candidate.position.1.is_finite()
+        || !candidate.position.2.is_finite()
+    {
+        return Err("invalid-fields");
+    }
+
+    let repository = unsafe { SoloParamRepository::instance() }.map_err(|_| "no-repository")?;
+    if repository
+        .get::<NpcParam>(candidate.npc_param_id as u32)
+        .is_none()
+    {
+        return Err("missing-npc-param");
+    }
+    if repository
+        .get::<NpcThinkParam>(candidate.npc_think_param_id as u32)
+        .is_none()
+    {
+        return Err("missing-think-param");
+    }
+    Ok(())
 }
 
 fn revenant_converted_soul_should_disappear(chr: &ChrIns) -> bool {
     let data = chr.modules.as_ref().data.as_ref();
-    data.hp <= 0 || chr.chr_flags1c5.death_flag() || chr.debug_flags.character_disabled()
+    data.hp <= 0 || chr.chr_flags1c5.death_flag() || runtime_chr_character_disabled(chr)
 }
 
 fn revenant_passive_roll(handle: FieldInsHandle, now: Instant) -> bool {
@@ -3484,13 +3605,16 @@ fn prepare_revenant_passive_buddy(chr: &mut ChrIns) {
     chr.chr_flags1c5.set_enable_render(true);
     chr.chr_flags1c8.set_is_active(true);
     chr.chr_activation_flags.set_activation_enabled(true);
-    chr.debug_flags.set_force_unloaded(false);
-    chr.debug_flags.set_force_loaded(true);
-    chr.debug_flags.set_character_disabled(false);
-    chr.debug_flags.set_disabled_updates(false);
-    chr.debug_flags.set_disabled_hit(false);
-    chr.debug_flags.set_disabled_movement(false);
-    chr.debug_flags.set_disabled_secondary_actions(false);
+    update_runtime_chr_debug_flags(
+        chr,
+        CHR_DEBUG_FORCE_LOADED,
+        CHR_DEBUG_FORCE_UNLOADED
+            | CHR_DEBUG_CHARACTER_DISABLED
+            | CHR_DEBUG_DISABLED_UPDATES
+            | CHR_DEBUG_DISABLED_HIT
+            | CHR_DEBUG_DISABLED_MOVEMENT
+            | CHR_DEBUG_DISABLED_SECONDARY_ACTIONS,
+    );
     chr.opacity_keyframes_multiplier = 1.0;
     chr.opacity_keyframes_multiplier_previous = 1.0;
     chr.tint_alpha_multiplier = 1.0;
@@ -3531,13 +3655,16 @@ fn release_revenant_debug_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantD
     chr.chr_flags1c5.set_death_flag(true);
     chr.chr_flags1c5.set_enable_render(false);
     chr.chr_flags1c8.set_is_active(false);
-    chr.debug_flags.set_force_loaded(false);
-    chr.debug_flags.set_force_unloaded(true);
-    chr.debug_flags.set_character_disabled(true);
-    chr.debug_flags.set_disabled_updates(true);
-    chr.debug_flags.set_disabled_hit(true);
-    chr.debug_flags.set_disabled_movement(true);
-    chr.debug_flags.set_disabled_secondary_actions(true);
+    update_runtime_chr_debug_flags(
+        chr,
+        CHR_DEBUG_FORCE_UNLOADED
+            | CHR_DEBUG_CHARACTER_DISABLED
+            | CHR_DEBUG_DISABLED_UPDATES
+            | CHR_DEBUG_DISABLED_HIT
+            | CHR_DEBUG_DISABLED_MOVEMENT
+            | CHR_DEBUG_DISABLED_SECONDARY_ACTIONS,
+        CHR_DEBUG_FORCE_LOADED,
+    );
     chr.base_transparency = 0.0;
     chr.base_transparency_modifier = 0.0;
     chr.tint_alpha_multiplier = 0.0;
@@ -3553,10 +3680,11 @@ fn release_revenant_passive_soul(world_chr_man: &mut WorldChrMan, soul: &Revenan
         group.chr.chr_flags1c5.set_death_flag(true);
         group.chr.chr_flags1c5.set_enable_render(false);
         group.chr.chr_flags1c8.set_is_active(false);
-        group.chr.debug_flags.set_force_loaded(false);
-        group.chr.debug_flags.set_force_unloaded(true);
-        group.chr.debug_flags.set_character_disabled(true);
-        group.chr.debug_flags.set_disabled_updates(true);
+        update_runtime_chr_debug_flags(
+            group.chr,
+            CHR_DEBUG_FORCE_UNLOADED | CHR_DEBUG_CHARACTER_DISABLED | CHR_DEBUG_DISABLED_UPDATES,
+            CHR_DEBUG_FORCE_LOADED,
+        );
     } else if let Some(handle) = soul.handle {
         if let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
             let data = chr.modules.as_mut().data.as_mut();
@@ -3564,10 +3692,13 @@ fn release_revenant_passive_soul(world_chr_man: &mut WorldChrMan, soul: &Revenan
             chr.chr_flags1c5.set_death_flag(true);
             chr.chr_flags1c5.set_enable_render(false);
             chr.chr_flags1c8.set_is_active(false);
-            chr.debug_flags.set_force_loaded(false);
-            chr.debug_flags.set_force_unloaded(true);
-            chr.debug_flags.set_character_disabled(true);
-            chr.debug_flags.set_disabled_updates(true);
+            update_runtime_chr_debug_flags(
+                chr,
+                CHR_DEBUG_FORCE_UNLOADED
+                    | CHR_DEBUG_CHARACTER_DISABLED
+                    | CHR_DEBUG_DISABLED_UPDATES,
+                CHR_DEBUG_FORCE_LOADED,
+            );
         }
     }
 }
@@ -4021,8 +4152,8 @@ fn collect_resurrection_accumulation_teammate_snapshots(
                 chr.team_type,
                 player_team_type,
             );
-            let runtime_visible = !chr.debug_flags.force_unloaded()
-                && !chr.debug_flags.character_disabled()
+            let runtime_visible = !runtime_chr_force_unloaded(chr)
+                && !runtime_chr_character_disabled(chr)
                 && !chr.load_state.backread_disabled();
             if !resurrection_accumulation_teammate_should_display(
                 chr.field_ins_handle.is_empty(),
@@ -4595,14 +4726,18 @@ fn consume_event_effect(
     offset: i32,
 ) -> bool {
     let shared = shared_effect(offset);
-    let legacy = config.effect(offset);
-    if shared == legacy {
-        return consume_effect(player, active_effects, shared);
-    }
-
     let shared_active = consume_effect(player, active_effects, shared);
-    let legacy_active = consume_effect(player, active_effects, legacy);
+    let legacy_active = legacy_event_effect_id(config, offset)
+        .is_some_and(|legacy| consume_effect(player, active_effects, legacy));
     shared_active || legacy_active
+}
+
+fn legacy_event_effect_id(config: &RoleConfig, offset: i32) -> Option<i32> {
+    let legacy = config.effect(offset);
+    // Undertaker's former ultimate aliases now belong to its buff and dodge outputs.
+    let reserved = config.role == Role::Undertaker
+        && matches!(offset, SP_ULTIMATE_CHARGED_USED | SP_ULTIMATE_UNCHARGED_USED);
+    (legacy != shared_effect(offset) && !reserved).then_some(legacy)
 }
 
 fn set_effect(player: &mut eldenring::cs::PlayerIns, sp_effect: i32, active: bool) {
@@ -4649,6 +4784,17 @@ fn remove_revenant_summon_active_effects_from_player(player: &mut eldenring::cs:
     }
 }
 
+fn clear_undertaker_skill_effects(player: &mut PlayerIns) {
+    set_undertaker_auto_dodge_armed(false);
+    clear_undertaker_dodge_effects(player);
+    for effect in [
+        SP_UNDERTAKER_NORMAL_SKILL_BUFF,
+        SP_UNDERTAKER_ENHANCED_SKILL_BUFF,
+    ] {
+        player.chr_ins.remove_speffect(effect);
+    }
+}
+
 fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
     for offset in [
         SP_SKILL_READY_1,
@@ -4667,6 +4813,8 @@ fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfi
     } else if config.role == Role::Revenant {
         remove_revenant_summon_death_effects_from_player(player);
         remove_revenant_summon_active_effects_from_player(player);
+    } else if config.role == Role::Undertaker {
+        clear_undertaker_skill_effects(player);
     }
 }
 
@@ -4719,15 +4867,128 @@ fn remove_all_role_outputs(player: &mut eldenring::cs::PlayerIns) {
 }
 
 #[cfg(test)]
+mod undertaker_skill_buff_tests {
+    use super::*;
+
+    #[test]
+    fn buff_and_dodge_outputs_are_not_consumed_as_ultimate_aliases() {
+        let config = role_config(Role::Undertaker);
+        assert_eq!(config.effect(SP_ULTIMATE_CHARGED_USED), SP_UNDERTAKER_ENHANCED_SKILL_BUFF);
+        assert_eq!(config.effect(SP_ULTIMATE_UNCHARGED_USED), SP_UNDERTAKER_AUTO_DODGE_TRIGGER);
+        assert_eq!(legacy_event_effect_id(config, SP_ULTIMATE_CHARGED_USED), None);
+        assert_eq!(legacy_event_effect_id(config, SP_ULTIMATE_UNCHARGED_USED), None);
+        assert_eq!(shared_effect(SP_ULTIMATE_CHARGED_USED), 880021);
+        assert_eq!(shared_effect(SP_ULTIMATE_UNCHARGED_USED), 880022);
+        assert_eq!(legacy_event_effect_id(config, SP_SKILL_USED), Some(880911));
+    }
+
+    #[test]
+    fn other_roles_retain_their_existing_ultimate_aliases() {
+        for config in ROLE_CONFIGS.iter().filter(|config| config.role != Role::Undertaker) {
+            for offset in [SP_ULTIMATE_CHARGED_USED, SP_ULTIMATE_UNCHARGED_USED] {
+                let legacy = config.effect(offset);
+                let expected = (legacy != shared_effect(offset)).then_some(legacy);
+                assert_eq!(legacy_event_effect_id(config, offset), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_skill_selects_the_matching_buff_and_duration() {
+        let now = Instant::now();
+        for (enhanced, effect, seconds) in [
+            (false, SP_UNDERTAKER_NORMAL_SKILL_BUFF, 8.0),
+            (true, SP_UNDERTAKER_ENHANCED_SKILL_BUFF, 15.0),
+        ] {
+            let mut state = ChargeState::new(now);
+            state.reset_for_role(Some(Role::Undertaker));
+            assert_eq!(state.begin_undertaker_skill(enhanced, now), effect);
+            assert_eq!(state.undertaker_buff_duration, seconds);
+            assert_eq!(state.undertaker_buff_end, Some(now + Duration::from_secs_f32(seconds)));
+            assert_eq!(state.skill_ready_count(role_config(Role::Undertaker)), 0);
+        }
+    }
+
+    #[test]
+    fn buff_countdown_keeps_its_deadline_and_ends_before_cooldown() {
+        let now = Instant::now();
+        let config = role_config(Role::Undertaker);
+        for enhanced in [false, true] {
+            let mut state = ChargeState::new(now);
+            state.reset_for_role(Some(Role::Undertaker));
+            state.begin_undertaker_skill(enhanced, now);
+            let end = state.undertaker_buff_end.unwrap();
+            state.advance_skill(config, now + Duration::from_secs(1), 1.0);
+            assert_eq!(state.undertaker_buff_end, Some(end));
+            assert!(!state.undertaker_auto_end_pending);
+            state.advance_skill(config, end, 0.1);
+            assert!(state.undertaker_buff_end.is_none());
+            assert!(state.undertaker_auto_end_pending);
+            assert_eq!(state.skill_layers, [0.0, 0.0]);
+            state.advance_skill(config, end + Duration::from_secs(7), 7.0);
+            assert_eq!(state.skill_layers, [0.5, 0.0]);
+        }
+    }
+
+    #[test]
+    fn role_reset_clears_the_internal_buff_and_dodge_id_is_assigned() {
+        let now = Instant::now();
+        let mut state = ChargeState::new(now);
+        state.reset_for_role(Some(Role::Undertaker));
+        state.begin_undertaker_skill(true, now);
+        state.reset_for_role(Some(Role::Wylder));
+        assert!(state.undertaker_buff_end.is_none());
+        assert!(!state.undertaker_auto_end_pending);
+        assert_eq!(SP_UNDERTAKER_AUTO_DODGE_TRIGGER, 880922);
+    }
+}
+
+#[cfg(test)]
 mod revenant_active_effect_tests {
     use super::{
         ChargeState, REVENANT_SUMMON_COUNT, WylderHookshotNativeResolver,
         WylderHookshotNativeResult, normalized_super_armor,
         resurrection_accumulation_teammate_is_friendly, revenant_active_effect_index,
-        resurrection_accumulation_teammate_should_display,
+        resurrection_accumulation_teammate_should_display, revenant_creator_request_consumed,
+        revenant_debug_spawn_submission_ready,
     };
     use eldenring::cs::{ChrType, FieldInsHandle};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn revenant_spawn_submission_waits_for_delay_and_idle_creator() {
+        let now = Instant::now();
+        let ready_at = now + Duration::from_millis(100);
+
+        assert!(!revenant_debug_spawn_submission_ready(
+            false, false, now, ready_at,
+        ));
+        assert!(!revenant_debug_spawn_submission_ready(
+            true,
+            false,
+            ready_at,
+            ready_at,
+        ));
+        assert!(!revenant_debug_spawn_submission_ready(
+            false,
+            true,
+            ready_at,
+            ready_at,
+        ));
+        assert!(revenant_debug_spawn_submission_ready(
+            false,
+            false,
+            ready_at,
+            ready_at,
+        ));
+    }
+
+    #[test]
+    fn revenant_result_waits_for_the_submitted_creator_request_to_be_consumed() {
+        assert!(!revenant_creator_request_consumed(true, true));
+        assert!(revenant_creator_request_consumed(true, false));
+        assert!(!revenant_creator_request_consumed(false, false));
+    }
 
     #[test]
     fn bound_living_family_selects_its_output() {

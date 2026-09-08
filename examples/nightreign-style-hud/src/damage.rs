@@ -1,4 +1,5 @@
 static INSTALL_DAMAGE_HOOK: Once = Once::new();
+static INSTALL_UNDERTAKER_AUTO_DODGE_HOOK: Once = Once::new();
 static INSTALL_REVENANT_SUMMON_RANGE_HOOK: Once = Once::new();
 static INSTALL_CAMERA_DIRECTED_POSITION_HOOK: Once = Once::new();
 static INSTALL_MULTI_LOCK_BULLET_HOOK: Once = Once::new();
@@ -17,6 +18,17 @@ static MULTI_LOCK_TARGET_MARKERS: LazyLock<Mutex<HashMap<FieldInsHandle, i32>>> 
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ULTIMATE_DAMAGE_EVENTS: AtomicU32 = AtomicU32::new(0);
 static LOCAL_DAMAGE_MODULE: AtomicUsize = AtomicUsize::new(0);
+static UNDERTAKER_AUTO_DODGE_AVAILABLE: AtomicBool = AtomicBool::new(false);
+static UNDERTAKER_AUTO_DODGE_ARMED: AtomicBool = AtomicBool::new(false);
+static UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+static UNDERTAKER_AUTO_DODGE_PENDING_HIT: AtomicU64 = AtomicU64::new(0);
+static UNDERTAKER_AUTO_DODGE_SUPPRESS_UNTIL_MS: AtomicUsize = AtomicUsize::new(0);
+static UNDERTAKER_AUTO_DODGE_REARM_AT_MS: AtomicUsize = AtomicUsize::new(0);
+static UNDERTAKER_AUTO_DODGE_CONTACTS: AtomicU32 = AtomicU32::new(0);
+static UNDERTAKER_AUTO_DODGE_PULSES: AtomicU32 = AtomicU32::new(0);
+static UNDERTAKER_AUTO_DODGE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+static UNDERTAKER_HURTBOX_SENSOR: LazyLock<Mutex<UndertakerHurtboxSensor>> =
+    LazyLock::new(|| Mutex::new(UndertakerHurtboxSensor::default()));
 static REVENANT_SUMMON_RANGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DAMAGE_HOOK_CALLS: AtomicU32 = AtomicU32::new(0);
 static DAMAGE_HOOK_POSITIVE: AtomicU32 = AtomicU32::new(0);
@@ -60,6 +72,58 @@ const DAMAGE_PROCESS_PATTERN: [Option<u8>; 23] = [
     Some(0x00),
     Some(0x48),
 ];
+const UNDERTAKER_HIT_DISPATCH_PATTERN: [Option<u8>; 40] = [
+    Some(0x48),
+    Some(0x89),
+    Some(0x5C),
+    Some(0x24),
+    Some(0x08),
+    Some(0x55),
+    Some(0x56),
+    Some(0x57),
+    Some(0x41),
+    Some(0x54),
+    Some(0x41),
+    Some(0x55),
+    Some(0x41),
+    Some(0x56),
+    Some(0x41),
+    Some(0x57),
+    Some(0x48),
+    Some(0x83),
+    Some(0xEC),
+    Some(0x60),
+    Some(0x33),
+    Some(0xF6),
+    Some(0x45),
+    Some(0x0F),
+    Some(0xB6),
+    Some(0xE9),
+    Some(0x89),
+    Some(0x74),
+    Some(0x24),
+    Some(0x34),
+    Some(0x4D),
+    Some(0x8B),
+    Some(0xF0),
+    Some(0x4C),
+    Some(0x8B),
+    Some(0xE2),
+    Some(0x48),
+    Some(0x8B),
+    Some(0xE9),
+    Some(0x48),
+];
+const UNDERTAKER_HURTBOX_RADIUS_MARGIN: f32 = 0.40;
+const UNDERTAKER_HURTBOX_RADIUS_MIN: f32 = 0.05;
+const UNDERTAKER_HURTBOX_RADIUS_MAX: f32 = 3.0;
+const UNDERTAKER_HURTBOX_RADIUS_INFLATED_MAX: f32 = 4.0;
+const UNDERTAKER_AUTO_DODGE_SUPPRESS_MS: usize = 650;
+const UNDERTAKER_AUTO_DODGE_REARM_MS: usize = 900;
+// ER 2.7 dispatcher 0x449D30 passes these fields to Atk resolver 0xD24760.
+const UNDERTAKER_DAMAGE_ATK_ID_OFFSET: usize = 0x40;
+const UNDERTAKER_DAMAGE_ATK_TABLE_OFFSET: usize = 0x44;
+const UNDERTAKER_PENDING_UNKNOWN_ATTACK: u64 = 1;
 const REVENANT_SUMMON_RANGE_PATTERN: [Option<u8>; 15] = [
     Some(0x48),
     Some(0x8B),
@@ -145,6 +209,20 @@ const RESURRECTION_TEAMMATE_FALLBACK_HEAD_LIFT: f32 = 1.9;
 const RESURRECTION_TEAMMATE_HEAD_PADDING: f32 = 0.35;
 const RESURRECTION_TEAMMATE_MAX_HEAD_LIFT: f32 = 8.0;
 type LockDebugPoints = [Option<[f32; 2]>; 5];
+
+#[derive(Default)]
+struct UndertakerHurtboxSensor {
+    physics_module: usize,
+    baseline_hit_radius: Option<f32>,
+    inflated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UndertakerHitDispatchAction {
+    Forward,
+    Reject,
+    Trigger,
+}
 
 #[derive(Clone, Copy)]
 struct MultiLockLiveWeaponGuidance {
@@ -242,6 +320,323 @@ fn install_damage_hook_once() {
             }
         }
     });
+}
+
+fn install_undertaker_auto_dodge_hook_once() {
+    INSTALL_UNDERTAKER_AUTO_DODGE_HOOK.call_once(|| {
+        let program = Program::current();
+        let Some(dispatch_rva) = find_undertaker_hit_dispatch_pattern(program) else {
+            append_damage_log("[init] Undertaker HitIns dispatcher pattern was not unique");
+            return;
+        };
+
+        let image_base = program.image().as_ptr() as usize;
+        let hook_site = image_base + dispatch_rva;
+        let hook = unsafe {
+            ilhook::x64::hook_closure_jmp_to_ret(
+                hook_site,
+                |regs: *mut ilhook::x64::Registers, original: usize| {
+                    undertaker_hit_dispatch_destination(regs, original)
+                },
+                ilhook::x64::CallbackOption::None,
+                ilhook::x64::HookFlags::empty(),
+            )
+        };
+
+        match hook {
+            Ok(hook) => {
+                std::mem::forget(hook);
+                UNDERTAKER_AUTO_DODGE_AVAILABLE.store(true, Ordering::Release);
+                append_damage_log(&format!(
+                    "[init] Undertaker auto-dodge hook installed at 0x{hook_site:X}"
+                ));
+            }
+            Err(error) => {
+                append_damage_log(&format!(
+                    "[init] Undertaker auto-dodge hook failed at 0x{hook_site:X}: {error:?}"
+                ));
+            }
+        }
+    });
+}
+
+unsafe extern "system" fn reject_undertaker_hit_dispatch(
+    _target: usize,
+    _source_chr: usize,
+    _damage_data: usize,
+    _flag: usize,
+) -> usize {
+    0
+}
+
+fn undertaker_hit_dispatch_destination(
+    regs: *mut ilhook::x64::Registers,
+    original: usize,
+) -> usize {
+    let regs = unsafe { &*regs };
+    let target_damage_module = regs.rcx as usize;
+    let damage_data = regs.r8 as usize;
+    let local_damage_module = LOCAL_DAMAGE_MODULE.load(Ordering::Acquire);
+    let now_ms = undertaker_auto_dodge_now_ms();
+    let positive_damage = damage_data != 0 && find_damage_candidate(damage_data).is_some();
+    let action = undertaker_hit_dispatch_action(
+        target_damage_module,
+        local_damage_module,
+        positive_damage,
+        UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire),
+        UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.load(Ordering::Acquire),
+        UNDERTAKER_AUTO_DODGE_PENDING_HIT.load(Ordering::Acquire) != 0,
+        now_ms,
+        UNDERTAKER_AUTO_DODGE_SUPPRESS_UNTIL_MS.load(Ordering::Acquire),
+        UNDERTAKER_AUTO_DODGE_REARM_AT_MS.load(Ordering::Acquire),
+    );
+
+    match action {
+        UndertakerHitDispatchAction::Forward => original,
+        UndertakerHitDispatchAction::Reject => {
+            reject_undertaker_hit_dispatch as *const () as usize
+        }
+        UndertakerHitDispatchAction::Trigger => {
+            let pending_hit = capture_undertaker_pending_attack(damage_data);
+            if UNDERTAKER_AUTO_DODGE_PENDING_HIT
+                .compare_exchange(0, pending_hit, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                UNDERTAKER_AUTO_DODGE_SUPPRESS_UNTIL_MS.store(
+                    now_ms.saturating_add(UNDERTAKER_AUTO_DODGE_SUPPRESS_MS),
+                    Ordering::Release,
+                );
+                UNDERTAKER_AUTO_DODGE_REARM_AT_MS.store(
+                    now_ms.saturating_add(UNDERTAKER_AUTO_DODGE_REARM_MS),
+                    Ordering::Release,
+                );
+                UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+                UNDERTAKER_AUTO_DODGE_CONTACTS.fetch_add(1, Ordering::Relaxed);
+            }
+            reject_undertaker_hit_dispatch as *const () as usize
+        }
+    }
+}
+
+fn undertaker_hit_dispatch_action(
+    target_damage_module: usize,
+    local_damage_module: usize,
+    positive_damage: bool,
+    armed: bool,
+    sensor_active: bool,
+    pending: bool,
+    now_ms: usize,
+    suppress_until_ms: usize,
+    rearm_at_ms: usize,
+) -> UndertakerHitDispatchAction {
+    if target_damage_module == 0
+        || local_damage_module == 0
+        || target_damage_module != local_damage_module
+    {
+        return UndertakerHitDispatchAction::Forward;
+    }
+    if pending || now_ms < suppress_until_ms {
+        return UndertakerHitDispatchAction::Reject;
+    }
+    if armed && sensor_active && now_ms >= rearm_at_ms && positive_damage {
+        return UndertakerHitDispatchAction::Trigger;
+    }
+    UndertakerHitDispatchAction::Forward
+}
+
+fn undertaker_auto_dodge_now_ms() -> usize {
+    UNDERTAKER_AUTO_DODGE_EPOCH
+        .elapsed()
+        .as_millis()
+        .min(usize::MAX as u128) as usize
+}
+
+fn set_undertaker_auto_dodge_armed(armed: bool) {
+    let armed = armed && UNDERTAKER_AUTO_DODGE_AVAILABLE.load(Ordering::Acquire);
+    UNDERTAKER_AUTO_DODGE_ARMED.store(armed, Ordering::Release);
+    if !armed {
+        clear_undertaker_auto_dodge_latches();
+    }
+}
+
+fn clear_undertaker_auto_dodge_latches() {
+    UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+    UNDERTAKER_AUTO_DODGE_PENDING_HIT.store(0, Ordering::Release);
+    UNDERTAKER_AUTO_DODGE_SUPPRESS_UNTIL_MS.store(0, Ordering::Release);
+    UNDERTAKER_AUTO_DODGE_REARM_AT_MS.store(0, Ordering::Release);
+}
+
+fn update_undertaker_auto_dodge_before_behavior() {
+    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
+        set_undertaker_auto_dodge_armed(false);
+        clear_undertaker_hurtbox_sensor_without_restore();
+        return;
+    };
+    let Some(player) = world_chr_man.main_player.as_mut() else {
+        set_undertaker_auto_dodge_armed(false);
+        clear_undertaker_hurtbox_sensor_without_restore();
+        return;
+    };
+
+    if UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire)
+        && !chr_has_speffect(&player.chr_ins, SP_UNDERTAKER_ENHANCED_SKILL_BUFF)
+    {
+        set_undertaker_auto_dodge_armed(false);
+        clear_undertaker_dodge_effects(player);
+    }
+    update_undertaker_hurtbox_sensor(player);
+    apply_pending_undertaker_auto_dodge(player);
+}
+
+fn update_undertaker_hurtbox_sensor(player: &mut PlayerIns) {
+    let physics = player.chr_ins.modules.as_mut().physics.as_mut();
+    let physics_module = physics as *mut _ as usize;
+    let Ok(mut sensor) = UNDERTAKER_HURTBOX_SENSOR.lock() else {
+        UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+        return;
+    };
+
+    if sensor.physics_module != physics_module {
+        *sensor = UndertakerHurtboxSensor {
+            physics_module,
+            baseline_hit_radius: valid_undertaker_hit_radius(physics.hit_radius)
+                .then_some(physics.hit_radius),
+            inflated: false,
+        };
+    }
+
+    let armed = UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire);
+    let now_ms = undertaker_auto_dodge_now_ms();
+    let cooling_down = UNDERTAKER_AUTO_DODGE_PENDING_HIT.load(Ordering::Acquire) != 0
+        || now_ms < UNDERTAKER_AUTO_DODGE_REARM_AT_MS.load(Ordering::Acquire);
+    let should_inflate = armed && !cooling_down;
+
+    if should_inflate {
+        if sensor.baseline_hit_radius.is_none() && valid_undertaker_hit_radius(physics.hit_radius) {
+            sensor.baseline_hit_radius = Some(physics.hit_radius);
+        }
+        if let Some(baseline) = sensor.baseline_hit_radius {
+            physics.hit_radius = undertaker_inflated_hit_radius(baseline);
+            sensor.inflated = true;
+            UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(true, Ordering::Release);
+            return;
+        }
+    }
+
+    if sensor.inflated {
+        if let Some(baseline) = sensor.baseline_hit_radius {
+            physics.hit_radius = baseline;
+        }
+        sensor.inflated = false;
+    }
+    UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+    if !armed {
+        *sensor = UndertakerHurtboxSensor::default();
+    }
+}
+
+fn clear_undertaker_hurtbox_sensor_without_restore() {
+    if let Ok(mut sensor) = UNDERTAKER_HURTBOX_SENSOR.lock() {
+        *sensor = UndertakerHurtboxSensor::default();
+    }
+    UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+}
+
+fn valid_undertaker_hit_radius(radius: f32) -> bool {
+    radius.is_finite()
+        && (UNDERTAKER_HURTBOX_RADIUS_MIN..=UNDERTAKER_HURTBOX_RADIUS_MAX).contains(&radius)
+}
+
+fn undertaker_inflated_hit_radius(radius: f32) -> f32 {
+    (radius + UNDERTAKER_HURTBOX_RADIUS_MARGIN).min(UNDERTAKER_HURTBOX_RADIUS_INFLATED_MAX)
+}
+
+fn capture_undertaker_pending_attack(damage_data: usize) -> u64 {
+    if damage_data == 0 {
+        return UNDERTAKER_PENDING_UNKNOWN_ATTACK;
+    }
+    // The hook owns this payload only for the duration of this native call.
+    let (row_id, table) = unsafe {
+        (
+            read_i32(damage_data + UNDERTAKER_DAMAGE_ATK_ID_OFFSET),
+            read_i32(damage_data + UNDERTAKER_DAMAGE_ATK_TABLE_OFFSET),
+        )
+    };
+    pack_undertaker_pending_attack(row_id, table)
+}
+
+fn pack_undertaker_pending_attack(row_id: i32, table: i32) -> u64 {
+    if row_id < 0 || !(0..=1).contains(&table) {
+        return UNDERTAKER_PENDING_UNKNOWN_ATTACK;
+    }
+    // One atomic value publishes both fields: 0=empty, 1=unknown, tags 2/3=NPC/PC.
+    ((row_id as u64) << 2) | (table as u64 + 2)
+}
+
+fn unpack_undertaker_pending_attack(pending_hit: u64) -> Option<(u32, u32)> {
+    let row_id = pending_hit >> 2;
+    let tag = pending_hit & 3;
+    if row_id > i32::MAX as u64 || tag < 2 {
+        return None;
+    }
+    Some(((tag - 2) as u32, row_id as u32))
+}
+
+fn undertaker_dodge_effects(
+    pending_hit: u64,
+    read_direction: impl FnOnce(u32, u32) -> Option<i8>,
+) -> [Option<i32>; 2] {
+    if pending_hit == 0 {
+        return [None, None];
+    }
+    let direction_effect = unpack_undertaker_pending_attack(pending_hit)
+        .and_then(|(table, row_id)| read_direction(table, row_id))
+        .and_then(|direction| usize::try_from(direction).ok())
+        .and_then(|direction| SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS.get(direction).copied());
+    [direction_effect, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)]
+}
+
+fn clear_undertaker_dodge_effects(player: &mut PlayerIns) {
+    player.chr_ins.remove_speffect(SP_UNDERTAKER_AUTO_DODGE_TRIGGER);
+    for effect in SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS {
+        player.chr_ins.remove_speffect(effect);
+    }
+}
+
+fn apply_pending_undertaker_auto_dodge(player: &mut PlayerIns) {
+    let pending_hit = UNDERTAKER_AUTO_DODGE_PENDING_HIT.swap(0, Ordering::AcqRel);
+    if pending_hit == 0 {
+        return;
+    }
+    if !UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let effects = undertaker_dodge_effects(pending_hit, |table, row_id| {
+        let repository = unsafe { SoloParamRepository::instance() }.ok()?;
+        let atk = match table {
+            0 => repository.get::<AtkParam_Npc>(row_id),
+            1 => repository.get::<AtkParam_Pc>(row_id),
+            _ => None,
+        }?;
+        Some(atk.atk_dir_for_sfx())
+    });
+    clear_undertaker_dodge_effects(player);
+    // Publish the direction before the generic request HKS consumes.
+    for effect in effects.into_iter().flatten() {
+        player.apply_speffect(effect, true);
+    }
+    UNDERTAKER_AUTO_DODGE_PULSES.fetch_add(1, Ordering::Relaxed);
+}
+
+fn undertaker_auto_dodge_probe() -> (bool, bool, bool, u32, u32) {
+    (
+        UNDERTAKER_AUTO_DODGE_AVAILABLE.load(Ordering::Acquire),
+        UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire),
+        UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.load(Ordering::Acquire),
+        UNDERTAKER_AUTO_DODGE_CONTACTS.load(Ordering::Relaxed),
+        UNDERTAKER_AUTO_DODGE_PULSES.load(Ordering::Relaxed),
+    )
 }
 
 fn install_revenant_summon_range_hook_once() {
@@ -378,6 +773,14 @@ fn find_damage_process_pattern(program: Program) -> Option<usize> {
     find_pattern_in_range(image, start, end, &DAMAGE_PROCESS_PATTERN)
 }
 
+fn find_undertaker_hit_dispatch_pattern(program: Program) -> Option<usize> {
+    let image = program.image();
+    let code_range = program.headers().code_range();
+    let start = code_range.start as usize;
+    let end = (code_range.end as usize).min(image.len());
+    find_unique_pattern_in_range(image, start, end, &UNDERTAKER_HIT_DISPATCH_PATTERN)
+}
+
 fn find_camera_directed_position_pattern(program: Program) -> Option<usize> {
     let image = program.image();
     let code_range = program.headers().code_range();
@@ -404,6 +807,29 @@ fn find_pattern_in_range(
                 .all(|(byte, expected)| expected.map_or(true, |expected| *byte == expected))
         })
         .map(|offset| start + offset)
+}
+
+fn find_unique_pattern_in_range(
+    image: &[u8],
+    start: usize,
+    end: usize,
+    pattern: &[Option<u8>],
+) -> Option<usize> {
+    if pattern.is_empty() || end <= start || end - start < pattern.len() {
+        return None;
+    }
+    let mut matches = image[start..end]
+        .windows(pattern.len())
+        .enumerate()
+        .filter(|(_, window)| {
+            window
+                .iter()
+                .zip(pattern.iter())
+                .all(|(byte, expected)| expected.map_or(true, |expected| *byte == expected))
+        })
+        .map(|(offset, _)| start + offset);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn apply_bullet_spawn_hook(regs: *mut ilhook::x64::Registers) {
@@ -1950,8 +2376,8 @@ fn scholar_candidate_debug(
         death_flag: chr.chr_flags1c5.death_flag(),
         is_active: chr.chr_flags1c8.is_active(),
         update_tasks_registered: chr.chr_flags1c8.update_tasks_registered(),
-        force_unloaded: chr.debug_flags.force_unloaded(),
-        character_disabled: chr.debug_flags.character_disabled(),
+        force_unloaded: runtime_chr_force_unloaded(chr),
+        character_disabled: runtime_chr_character_disabled(chr),
         tint_alpha: chr.tint_alpha_multiplier,
         tint_alpha_modifier: chr.tint_alpha_multiplier_modifier,
         base_transparency: chr.base_transparency,
@@ -1964,10 +2390,10 @@ fn scholar_candidate_debug(
         opacity_keyframes: chr.opacity_keyframes_multiplier,
         opacity_keyframes_previous: chr.opacity_keyframes_multiplier_previous,
         camouflage_transparency: chr.camouflage_transparency,
-        distance_to_player_sqr: chr.distance_to_player_sqr,
-        horizontal_distance_to_player_sqr: chr.horizontal_distance_to_player_sqr,
-        max_render_range: chr.max_render_range,
-        chr_activate_threshold: chr.chr_activate_threshold,
+        distance_to_player_sqr: runtime_chr_distance_to_player_sqr(chr),
+        horizontal_distance_to_player_sqr: runtime_chr_horizontal_distance_to_player_sqr(chr),
+        max_render_range: runtime_chr_max_render_range(chr),
+        chr_activate_threshold: runtime_chr_activate_threshold(chr),
         current_anim_id: scholar_current_anim_id(chr),
         request_anim_id: chr.modules.as_ref().event.as_ref().request_animation_id,
         idle_anim_id: chr.modules.as_ref().event.as_ref().idle_anim_id,
@@ -2128,8 +2554,8 @@ fn scholar_is_event_hidden(chr: &eldenring::cs::ChrIns) -> bool {
     let chr_set_entry = unsafe { chr.chr_set_entry.as_ref() };
     chr.chr_flags1c5.death_flag()
         || (chr_set_entry.entry_flags & 0x01) != 0
-        || chr.debug_flags.force_unloaded()
-        || chr.debug_flags.character_disabled()
+        || runtime_chr_force_unloaded(chr)
+        || runtime_chr_character_disabled(chr)
         || (!chr.load_state.draw_group_enabled()
             && (!chr.chr_flags1c5.enable_render() || !chr.chr_flags1c4.is_render_group_enabled()))
 }
@@ -2168,10 +2594,6 @@ fn scholar_reject_reason(chr: &eldenring::cs::ChrIns) -> Option<ScholarRejectRea
 
     if scholar_is_event_hidden(chr) || !scholar_is_lockable(chr) || scholar_is_excluded_model(chr)
     {
-        return Some(ScholarRejectReason::Hidden);
-    }
-
-    if scholar_current_anim_id(chr) == -1 {
         return Some(ScholarRejectReason::Hidden);
     }
 
@@ -2340,6 +2762,214 @@ mod camera_depth_side_tests {
                 [0.0, 0.0, f32::NAN],
             ),
             None
+        );
+    }
+
+    #[test]
+    fn scholar_filter_does_not_depend_on_a_fixed_animation_queue_slot() {
+        let source = include_str!("damage.rs");
+        let filter_start = source
+            .find("fn scholar_reject_reason")
+            .expect("Scholar target filter must exist");
+        let filter_end = source[filter_start..]
+            .find("\nfn scholar_progress_stage")
+            .map(|offset| filter_start + offset)
+            .expect("Scholar target filter must have a bounded body");
+        let filter = &source[filter_start..filter_end];
+
+        assert!(!filter.contains("scholar_current_anim_id"));
+        assert!(!filter.contains("anim_queue"));
+    }
+}
+
+#[cfg(test)]
+mod undertaker_auto_dodge_tests {
+    use super::{
+        AtomicU64, Ordering, SP_UNDERTAKER_AUTO_DODGE_TRIGGER,
+        UNDERTAKER_PENDING_UNKNOWN_ATTACK, UndertakerHitDispatchAction,
+        capture_undertaker_pending_attack, find_unique_pattern_in_range,
+        pack_undertaker_pending_attack, undertaker_dodge_effects,
+        undertaker_hit_dispatch_action, undertaker_inflated_hit_radius,
+        unpack_undertaker_pending_attack, valid_undertaker_hit_radius,
+    };
+
+    #[test]
+    fn incoming_atk_key_uses_native_offsets_and_keeps_no_payload_pointer() {
+        let mut payload = [0u8; 0x48];
+        payload[0x40..0x44].copy_from_slice(&2110460i32.to_le_bytes());
+        payload[0x44..0x48].copy_from_slice(&1i32.to_le_bytes());
+        let pending = capture_undertaker_pending_attack(payload.as_ptr() as usize);
+        payload.fill(0xff);
+        assert_eq!(unpack_undertaker_pending_attack(pending), Some((1, 2110460)));
+        assert_eq!(
+            capture_undertaker_pending_attack(payload.as_ptr() as usize),
+            UNDERTAKER_PENDING_UNKNOWN_ATTACK,
+        );
+        assert_eq!(capture_undertaker_pending_attack(0), UNDERTAKER_PENDING_UNKNOWN_ATTACK);
+    }
+
+    #[test]
+    fn pending_atk_keys_validate_signed_fields_and_preserve_both_tables() {
+        for table in 0..=1 {
+            for row_id in [0, 2110460, i32::MAX] {
+                assert_eq!(
+                    unpack_undertaker_pending_attack(pack_undertaker_pending_attack(row_id, table)),
+                    Some((table as u32, row_id as u32)),
+                );
+            }
+        }
+        for (row_id, table) in [(-1, 0), (i32::MIN, 1), (100, -1), (100, 2)] {
+            let pending = pack_undertaker_pending_attack(row_id, table);
+            assert_eq!(pending, UNDERTAKER_PENDING_UNKNOWN_ATTACK);
+            assert_eq!(unpack_undertaker_pending_attack(pending), None);
+        }
+        assert_eq!(unpack_undertaker_pending_attack(u64::MAX), None);
+    }
+
+    #[test]
+    fn only_five_directions_emit_a_marker_before_the_generic_request() {
+        for direction in i8::MIN..=i8::MAX {
+            let expected = match direction {
+                0 => Some(880930),
+                1 => Some(880931),
+                2 => Some(880932),
+                3 => Some(880933),
+                4 => Some(880934),
+                _ => None,
+            };
+            assert_eq!(
+                undertaker_dodge_effects(pack_undertaker_pending_attack(100, 0), |_, _| Some(direction)),
+                [expected, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)],
+            );
+        }
+    }
+
+    #[test]
+    fn same_atk_id_in_npc_and_pc_tables_uses_the_exact_source_table() {
+        for (source, expected) in [(0, 880933), (1, 880934)] {
+            let mut calls = 0;
+            let effects = undertaker_dodge_effects(pack_undertaker_pending_attack(100, source), |table, id| {
+                calls += 1;
+                match (table, id) {
+                    (0, 100) => Some(3),
+                    (1, 100) => Some(4),
+                    _ => None,
+                }
+            });
+            assert_eq!(calls, 1);
+            assert_eq!(effects, [Some(expected), Some(880922)]);
+        }
+    }
+
+    #[test]
+    fn unknown_or_missing_attack_keeps_only_generic_and_empty_queue_does_nothing() {
+        assert_eq!(undertaker_dodge_effects(0, |_, _| panic!("empty queue lookup")), [None, None]);
+        assert_eq!(
+            undertaker_dodge_effects(UNDERTAKER_PENDING_UNKNOWN_ATTACK, |_, _| panic!("unknown key lookup")),
+            [None, Some(880922)],
+        );
+        assert_eq!(
+            undertaker_dodge_effects(pack_undertaker_pending_attack(100, 0), |_, _| None),
+            [None, Some(880922)],
+        );
+    }
+
+    #[test]
+    fn first_pending_contact_is_atomic_and_consumption_or_clear_drops_its_key() {
+        let pending = AtomicU64::new(0);
+        let first = pack_undertaker_pending_attack(100, 0);
+        let second = pack_undertaker_pending_attack(200, 1);
+        assert_eq!(pending.compare_exchange(0, first, Ordering::AcqRel, Ordering::Acquire), Ok(0));
+        assert_eq!(pending.compare_exchange(0, second, Ordering::AcqRel, Ordering::Acquire), Err(first));
+        assert_eq!(pending.swap(0, Ordering::AcqRel), first);
+        assert_eq!(pending.swap(0, Ordering::AcqRel), 0);
+        assert_eq!(pending.compare_exchange(0, second, Ordering::AcqRel, Ordering::Acquire), Ok(0));
+        pending.store(0, Ordering::Release);
+        assert_eq!(pending.swap(0, Ordering::AcqRel), 0);
+    }
+
+    #[test]
+    fn only_local_positive_sensor_contacts_trigger() {
+        let trigger = undertaker_hit_dispatch_action(
+            0x1000, 0x1000, true, true, true, false, 100, 0, 0,
+        );
+        assert_eq!(trigger, UndertakerHitDispatchAction::Trigger);
+
+        for action in [
+            undertaker_hit_dispatch_action(
+                0x2000, 0x1000, true, true, true, false, 100, 0, 0,
+            ),
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, false, true, true, false, 100, 0, 0,
+            ),
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, true, false, true, false, 100, 0, 0,
+            ),
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, true, true, false, false, 100, 0, 0,
+            ),
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, true, true, true, false, 100, 0, 200,
+            ),
+        ] {
+            assert_eq!(action, UndertakerHitDispatchAction::Forward);
+        }
+    }
+
+    #[test]
+    fn pending_and_bounded_suppression_reject_duplicate_local_hits() {
+        assert_eq!(
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, false, false, false, true, 100, 0, 0,
+            ),
+            UndertakerHitDispatchAction::Reject,
+        );
+        assert_eq!(
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, false, false, false, false, 499, 500, 0,
+            ),
+            UndertakerHitDispatchAction::Reject,
+        );
+        assert_eq!(
+            undertaker_hit_dispatch_action(
+                0x1000, 0x1000, false, false, false, false, 500, 500, 0,
+            ),
+            UndertakerHitDispatchAction::Forward,
+        );
+        assert_eq!(
+            undertaker_hit_dispatch_action(
+                0x2000, 0x1000, true, true, true, true, 100, 500, 0,
+            ),
+            UndertakerHitDispatchAction::Forward,
+        );
+    }
+
+    #[test]
+    fn hurtbox_radius_is_validated_and_inflated_with_a_hard_cap() {
+        assert!(valid_undertaker_hit_radius(0.4));
+        assert!(!valid_undertaker_hit_radius(0.0));
+        assert!(!valid_undertaker_hit_radius(f32::NAN));
+        assert_eq!(undertaker_inflated_hit_radius(0.4), 0.8);
+        assert_eq!(undertaker_inflated_hit_radius(3.8), 4.0);
+    }
+
+    #[test]
+    fn native_patterns_must_match_exactly_once() {
+        let pattern = [Some(0xAA), None, Some(0xCC)];
+        let unique = [0x00, 0xAA, 0xBB, 0xCC, 0x00];
+        assert_eq!(
+            find_unique_pattern_in_range(&unique, 0, unique.len(), &pattern),
+            Some(1),
+        );
+
+        let duplicate = [0xAA, 0x01, 0xCC, 0xAA, 0x02, 0xCC];
+        assert_eq!(
+            find_unique_pattern_in_range(&duplicate, 0, duplicate.len(), &pattern),
+            None,
+        );
+        assert_eq!(
+            find_unique_pattern_in_range(&unique, 2, unique.len(), &pattern),
+            None,
         );
     }
 }

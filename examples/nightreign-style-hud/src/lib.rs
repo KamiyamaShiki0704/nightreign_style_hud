@@ -5,17 +5,18 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::{
     LazyLock, Mutex, Once,
-    atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
 use eldenring::{
     cs::{
-        BuddyParam, BuddyStoneParam, BulletSpawnData, CSBulletManager, CSCamExt, CSCamera,
-        CSFeManHudState, CSFeManImp, CSHavokMan, CSNowLoadingHelper, CSTaskGroupIndex, CSTaskImp,
-        CSWindowImp, ChrDebugSpawnRequest, ChrIns, ChrInsExt, ChrType, EnemyIns, FieldInsHandle,
-        FieldInsType, GameDataMan, GameMan, LockCamParam, PlayerIns, SoloParamRepository,
-        SpEffectParam, WorldChrMan, bullet_spawn_rva,
+        AtkParam_Npc, AtkParam_Pc, BuddyParam, BuddyStoneParam, BulletSpawnData, CSBulletManager,
+        CSCamExt, CSCamera, CSFeManHudState, CSFeManImp, CSHavokMan, CSNowLoadingHelper,
+        CSTaskGroupIndex, CSTaskImp, CSWindowImp, ChrDebugSpawnRequest, ChrIns, ChrInsExt, ChrType,
+        EnemyIns, FieldInsHandle, FieldInsType, GameDataMan, GameMan, LockCamParam, NpcParam,
+        NpcThinkParam, PlayerIns, SoloParamRepository, SpEffectParam, WorldChrMan,
+        bullet_spawn_rva,
     },
     fd4::FD4TaskData,
     position::{DirectionalVector, HavokPosition, PositionDelta},
@@ -31,6 +32,7 @@ use hudhook::{
 use image::io::Reader as ImageReader;
 use pelite::pe64::{Pe, PeObject};
 
+include!("runtime_layout.rs");
 include!("damage.rs");
 include!("hud.rs");
 include!("roles.rs");

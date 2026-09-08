@@ -854,3 +854,50 @@ fn project_with_camera_axes(
 fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activation_and_private_asset_names_are_preserved() {
+        assert_eq!(ACTIVATION_SPEFFECT, 883100);
+        for (index, files) in RETICLE_FILES.iter().enumerate() {
+            assert_eq!(files[0], format!("Precision_Reticle{}.png", index + 1));
+            assert_eq!(files[1], format!("Ironeye_Reticle{}.png", index + 1));
+        }
+    }
+
+    #[test]
+    fn embedded_reticle_layers_decode_and_match_dimensions() {
+        let images: Vec<_> = EMBEDDED_RETICLES
+            .iter()
+            .map(|bytes| image::load_from_memory(bytes).unwrap().into_rgba8())
+            .collect();
+        for image in &images {
+            assert_eq!(image.dimensions(), images[0].dimensions());
+            assert!(image.width() > 0 && image.height() > 0);
+            assert!(image.pixels().any(|pixel| pixel[3] > 0));
+        }
+    }
+
+    #[test]
+    fn convergence_projects_to_center_and_rejects_degenerate_depth() {
+        let axes = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        assert_eq!(
+            project_with_camera_axes(
+                [0.0, 0.0, RETICLE_CONVERGENCE_DISTANCE],
+                axes,
+                1920.0,
+                1080.0,
+                16.0 / 9.0,
+                1.0,
+            ),
+            Some([960.0, 540.0]),
+        );
+        assert_eq!(
+            project_with_camera_axes([0.0; 3], axes, 1920.0, 1080.0, 16.0 / 9.0, 1.0),
+            None,
+        );
+    }
+}

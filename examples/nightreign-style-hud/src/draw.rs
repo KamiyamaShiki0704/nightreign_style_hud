@@ -321,6 +321,23 @@ fn draw_recluse_blood_debug(debug: RecluseBloodDebug, scale: f32) {
     );
 }
 
+fn draw_undertaker_auto_dodge_probe(enhanced_active: bool, scale: f32) {
+    if !enhanced_active {
+        return;
+    }
+    let (available, armed, sensor, contacts, pulses) = undertaker_auto_dodge_probe();
+    let line = format!(
+        "Undertaker pre-hit dodge  ready:{} armed:{} sensor:{} contacts:{} pulses:{}",
+        available as u8, armed as u8, sensor as u8, contacts, pulses,
+    );
+    let color = if available && armed && sensor {
+        ImColor32::from_rgba(190, 245, 220, 235)
+    } else {
+        ImColor32::from_rgba(255, 210, 150, 235)
+    };
+    draw_sized_text([24.0 * scale, 134.0 * scale], 16.0 * scale, color, &line);
+}
+
 fn draw_revenant_static_summon_ui(
     ui: &Ui,
     skill_center: [f32; 2],
@@ -1061,180 +1078,6 @@ fn draw_scholar_debug(debug: ScholarScanDebug) {
         18.0,
         ImColor32::from_rgba(235, 245, 255, 220),
         &text,
-    );
-    let candidate = debug.candidate;
-    if !candidate.active {
-        return;
-    }
-    let id_text = format!(
-        "Scholar cand  npc:{} type:{} hp:{}/{} dist:{:.1} h:{}:{}:{}:{} sel:{}:{} load:{} upd:{}",
-        candidate.npc_id,
-        candidate.chr_type,
-        candidate.hp,
-        candidate.max_hp,
-        candidate.distance,
-        candidate.block_area,
-        candidate.block_block,
-        candidate.block_region,
-        candidate.block_index,
-        candidate.selector_container,
-        candidate.selector_index,
-        candidate.load_status,
-        candidate.chr_update_type,
-    );
-    let flag_text = format!(
-        "load dg:{} br:{} host:{} ext:{} near:{} | render rg:{} on:{} en:{} dead:{}",
-        candidate.draw_group as u8,
-        candidate.backread_disabled as u8,
-        candidate.host_inactive as u8,
-        candidate.extinction_death as u8,
-        candidate.near_pc as u8,
-        candidate.render_group as u8,
-        candidate.onscreen_flag as u8,
-        candidate.enable_render as u8,
-        candidate.death_flag as u8,
-    );
-    let state_text = format!(
-        "state active:{} task:{} unload:{} disabled:{} tint:{:.2}/{:.2} base:{:.2}/{:.2}",
-        candidate.is_active as u8,
-        candidate.update_tasks_registered as u8,
-        candidate.force_unloaded as u8,
-        candidate.character_disabled as u8,
-        candidate.tint_alpha,
-        candidate.tint_alpha_modifier,
-        candidate.base_transparency,
-        candidate.base_transparency_modifier,
-    );
-    let event_text = format!(
-        "event id:{} ef:{:02X} act:{} th:{} snd:{} anim:{}/{}/{} tae:{} op:{:.2}/{:.2} camo:{:.2} d:{:.0}/{:.0} mr:{:.1} at:{:.1}",
-        candidate.event_entity_id,
-        candidate.chr_set_entry_flags,
-        candidate.activation_enabled as u8,
-        candidate.activate_threshold_exceeded as u8,
-        candidate.sounds_active as u8,
-        candidate.current_anim_id,
-        candidate.request_anim_id,
-        candidate.idle_anim_id,
-        candidate.current_tae_id,
-        candidate.opacity_keyframes,
-        candidate.opacity_keyframes_previous,
-        candidate.camouflage_transparency,
-        candidate.distance_to_player_sqr,
-        candidate.horizontal_distance_to_player_sqr,
-        candidate.max_render_range,
-        candidate.chr_activate_threshold,
-    );
-    let los_text = format!(
-        "los f[0,1,2,4,8,16,32,64,128] hit:{:03X} near:{:03X} block:{:03X} closest:{:.1} target:{:.1} bf:{}",
-        candidate.los_hit_mask,
-        candidate.los_near_mask,
-        candidate.los_block_mask,
-        candidate.los_closest_hit_distance,
-        candidate.los_target_distance,
-        candidate.los_block_filter,
-    );
-    let ctrl_text = format!(
-        "ctrl coll:{:X} mv:{} pc:{} hit:{} map:{} cap:{} obj:{} sync:{}/{}",
-        candidate.chr_collision,
-        candidate.ctrl_disable_move as u8,
-        candidate.ctrl_disable_player_collision as u8,
-        candidate.ctrl_disable_hit as u8,
-        candidate.ctrl_disable_map_collision as u8,
-        candidate.ctrl_disable_capsule_collision as u8,
-        candidate.ctrl_disable_object_collision as u8,
-        candidate.ctrl_proxy_pos_sync as u8,
-        candidate.ctrl_proxy_rot_sync as u8,
-    );
-    let physics_text = format!(
-        "phys proxy:{:X}/{:X} shape:{:X} posreq:{} ground:{}/{} slide:{} grav:{}",
-        candidate.physics_chr_proxy,
-        candidate.physics_chr_proxy2,
-        candidate.physics_collision_shape,
-        candidate.physics_pos_update_requested as u8,
-        candidate.physics_standing_on_ground as u8,
-        candidate.physics_touching_ground as u8,
-        candidate.physics_slide_enabled as u8,
-        candidate.physics_gravity_disabled as u8,
-    );
-    let raw_ptr_text = format!(
-        "raw ptr chr:{:X} data:{:X} entry:{:X} msbdf:{:08X} part:{:X}",
-        candidate.chr_ptr,
-        candidate.data_ptr,
-        candidate.chr_set_entry_ptr,
-        candidate.msb_draw_flags,
-        candidate.msb_part_ptr,
-    );
-    let raw_hash_text = format!(
-        "raw hash chr:{:08X} data:{:08X} msb:{:08X} entry:{:08X}",
-        candidate.chr_hash,
-        candidate.data_hash,
-        candidate.msb_hash,
-        candidate.entry_hash,
-    );
-    let entry_raw_text = format!(
-        "entry raw {:016X} {:016X}",
-        candidate.entry_raw0,
-        candidate.entry_raw1,
-    );
-    draw_sized_text(
-        [24.0, 232.0],
-        16.0,
-        ImColor32::from_rgba(220, 245, 255, 220),
-        &id_text,
-    );
-    draw_sized_text(
-        [24.0, 252.0],
-        16.0,
-        ImColor32::from_rgba(220, 245, 255, 220),
-        &flag_text,
-    );
-    draw_sized_text(
-        [24.0, 272.0],
-        16.0,
-        ImColor32::from_rgba(220, 245, 255, 220),
-        &state_text,
-    );
-    draw_sized_text(
-        [24.0, 292.0],
-        16.0,
-        ImColor32::from_rgba(220, 245, 255, 220),
-        &event_text,
-    );
-    draw_sized_text(
-        [24.0, 312.0],
-        16.0,
-        ImColor32::from_rgba(210, 235, 255, 225),
-        &ctrl_text,
-    );
-    draw_sized_text(
-        [24.0, 332.0],
-        16.0,
-        ImColor32::from_rgba(210, 235, 255, 225),
-        &physics_text,
-    );
-    draw_sized_text(
-        [24.0, 352.0],
-        16.0,
-        ImColor32::from_rgba(210, 235, 255, 225),
-        &raw_ptr_text,
-    );
-    draw_sized_text(
-        [24.0, 372.0],
-        16.0,
-        ImColor32::from_rgba(210, 235, 255, 225),
-        &raw_hash_text,
-    );
-    draw_sized_text(
-        [24.0, 392.0],
-        16.0,
-        ImColor32::from_rgba(210, 235, 255, 225),
-        &entry_raw_text,
-    );
-    draw_sized_text(
-        [24.0, 412.0],
-        16.0,
-        ImColor32::from_rgba(255, 230, 190, 230),
-        &los_text,
     );
 }
 

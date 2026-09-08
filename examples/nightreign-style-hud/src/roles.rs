@@ -191,6 +191,7 @@ struct ScholarScanDebug {
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 struct ScholarCandidateDebug {
     active: bool,
     selector_index: u32,
@@ -396,6 +397,11 @@ const SP_SKILL_USED_ENHANCED: i32 = 13;
 const SP_SKILL_CANCEL: i32 = 14;
 const SP_UNDERTAKER_SKILL_AUTO_END: i32 = 15;
 const SP_UNDERTAKER_ULTIMATE_FREE_TRIGGER: i32 = 16;
+const SP_UNDERTAKER_NORMAL_SKILL_BUFF: i32 = 880920;
+const SP_UNDERTAKER_ENHANCED_SKILL_BUFF: i32 = 880921;
+const SP_UNDERTAKER_AUTO_DODGE_TRIGGER: i32 = 880922;
+// atkDir_forSfx: Front, Top, Bottom, Left, Right (not world-space bearing).
+const SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS: [i32; 5] = [880930, 880931, 880932, 880933, 880934];
 const SP_IRONEYE_WEAKNESS_TRIGGER: i32 = 17;
 const SP_RECLUSE_RELEASED: i32 = 18;
 const SP_RECLUSE_RESTORE_FP: i32 = 19;

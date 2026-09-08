@@ -8,14 +8,21 @@ custom reticle.
 This build uses the workspace's pinned `fromsoftware-rs` compatibility commit:
 
 ```text
-f96aa78e26d51838c31c411e05a41834631d54d5
+3c8c1d7633a99309fb004c9f894ea10b7967d0e0
 ```
 
-The binding layer explicitly supports Elden Ring `2.7.0.0` (Worldwide) and
-`2.7.0.1` (Japanese). The standalone crate contains no fixed game RVA of its
+The binding layer explicitly supports Elden Ring `2.6.2.0`, `2.7.0.0` and
+`2.7.1.0` (Worldwide), plus `2.6.2.1` and `2.7.0.1` (Japanese).
+Worldwide `2.7.1.0` is patch 1.17.1; new Japanese 2.7.1.x is not verified.
+The standalone crate contains no fixed game RVA of its
 own; singleton and task addresses are selected by that versioned binding
 layer. Unknown executable versions are rejected rather than using guessed
 addresses.
+
+The 1.17.1 build includes the corrected shared task-registration address;
+activation, camera tuning and external reticle loading remain unchanged.
+This DLL and the main HUD are distributed on the same repository's Releases
+page, in separate packages. In-game validation is still required.
 
 ## Activation
 

@@ -79,6 +79,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
         ctx.io_mut().config_flags |= hudhook::imgui::ConfigFlags::NO_MOUSE_CURSOR_CHANGE;
         self.icons.load(render_context);
         install_damage_hook_once();
+        install_undertaker_auto_dodge_hook_once();
         install_revenant_summon_range_hook_once();
         install_camera_directed_position_hook_once();
         install_multi_lock_bullet_hook_once();
@@ -237,6 +238,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
         if role == Role::Scholar {
             draw_scholar_damage_numbers(ui, &snapshot, self.scale);
         }
+        draw_undertaker_auto_dodge_probe(snapshot.undertaker_enhanced_skill_buff, self.scale);
         draw_recluse_blood_debug(snapshot.recluse_blood_debug, self.scale);
         draw_charge_slot(
             ui,
