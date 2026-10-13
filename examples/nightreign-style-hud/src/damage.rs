@@ -5,16 +5,16 @@ static INSTALL_CAMERA_DIRECTED_POSITION_HOOK: Once = Once::new();
 static INSTALL_MULTI_LOCK_BULLET_HOOK: Once = Once::new();
 static MULTI_LOCK_BULLET_TARGET_CURSOR: AtomicUsize = AtomicUsize::new(0);
 static MULTI_LOCK_BULLET_SPAWNING_CLONE: AtomicBool = AtomicBool::new(false);
-static MULTI_LOCK_LIVE_BULLET_SEEN: LazyLock<Mutex<HashSet<FieldInsHandle>>> =
+static MULTI_LOCK_LIVE_BULLET_SEEN: LazyLock<Mutex<HashSet<native_bullets::Key>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static MULTI_LOCK_LIVE_BULLET_COUNT: AtomicU32 = AtomicU32::new(0);
 static MULTI_LOCK_LIVE_GUIDED_BULLET_COUNT: AtomicU32 = AtomicU32::new(0);
 static MULTI_LOCK_LIVE_WEAPON_GUIDANCE: LazyLock<
-    Mutex<HashMap<FieldInsHandle, MultiLockLiveWeaponGuidance>>,
+    Mutex<HashMap<native_bullets::Key, MultiLockLiveWeaponGuidance>>,
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 static MULTI_LOCK_SPAWN_HOOK_BULLET_PARAMS: LazyLock<Mutex<HashMap<i32, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static MULTI_LOCK_TARGET_MARKERS: LazyLock<Mutex<HashMap<FieldInsHandle, i32>>> =
+static MULTI_LOCK_TARGET_MARKERS: LazyLock<Mutex<HashMap<HudHandle, i32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static ULTIMATE_DAMAGE_EVENTS: AtomicU32 = AtomicU32::new(0);
 static LOCAL_DAMAGE_MODULE: AtomicUsize = AtomicUsize::new(0);
@@ -22,6 +22,7 @@ static UNDERTAKER_AUTO_DODGE_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static UNDERTAKER_AUTO_DODGE_ARMED: AtomicBool = AtomicBool::new(false);
 static UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 static UNDERTAKER_AUTO_DODGE_PENDING_HIT: AtomicU64 = AtomicU64::new(0);
+static UNDERTAKER_AUTO_DODGE_DISPATCH_BLOCKED: AtomicBool = AtomicBool::new(false);
 static UNDERTAKER_AUTO_DODGE_SUPPRESS_UNTIL_MS: AtomicUsize = AtomicUsize::new(0);
 static UNDERTAKER_AUTO_DODGE_REARM_AT_MS: AtomicUsize = AtomicUsize::new(0);
 static UNDERTAKER_AUTO_DODGE_CONTACTS: AtomicU32 = AtomicU32::new(0);
@@ -47,73 +48,6 @@ static DUCHESS_REPLAY_IGNORES: LazyLock<Mutex<HashMap<usize, DuchessReplayPayloa
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static CAMERA_DIRECTED_VERTICAL_BIAS: LazyLock<Mutex<f32>> = LazyLock::new(|| Mutex::new(0.0));
 
-const DAMAGE_PROCESS_PATTERN: [Option<u8>; 23] = [
-    Some(0x4C),
-    Some(0x8B),
-    Some(0xDC),
-    Some(0x55),
-    Some(0x53),
-    Some(0x56),
-    Some(0x57),
-    Some(0x41),
-    Some(0x56),
-    Some(0x41),
-    Some(0x57),
-    Some(0x49),
-    Some(0x8D),
-    Some(0x6B),
-    Some(0x88),
-    Some(0x48),
-    Some(0x81),
-    Some(0xEC),
-    Some(0x48),
-    Some(0x01),
-    Some(0x00),
-    Some(0x00),
-    Some(0x48),
-];
-const UNDERTAKER_HIT_DISPATCH_PATTERN: [Option<u8>; 40] = [
-    Some(0x48),
-    Some(0x89),
-    Some(0x5C),
-    Some(0x24),
-    Some(0x08),
-    Some(0x55),
-    Some(0x56),
-    Some(0x57),
-    Some(0x41),
-    Some(0x54),
-    Some(0x41),
-    Some(0x55),
-    Some(0x41),
-    Some(0x56),
-    Some(0x41),
-    Some(0x57),
-    Some(0x48),
-    Some(0x83),
-    Some(0xEC),
-    Some(0x60),
-    Some(0x33),
-    Some(0xF6),
-    Some(0x45),
-    Some(0x0F),
-    Some(0xB6),
-    Some(0xE9),
-    Some(0x89),
-    Some(0x74),
-    Some(0x24),
-    Some(0x34),
-    Some(0x4D),
-    Some(0x8B),
-    Some(0xF0),
-    Some(0x4C),
-    Some(0x8B),
-    Some(0xE2),
-    Some(0x48),
-    Some(0x8B),
-    Some(0xE9),
-    Some(0x48),
-];
 const UNDERTAKER_HURTBOX_RADIUS_MARGIN: f32 = 0.40;
 const UNDERTAKER_HURTBOX_RADIUS_MIN: f32 = 0.05;
 const UNDERTAKER_HURTBOX_RADIUS_MAX: f32 = 3.0;
@@ -124,39 +58,8 @@ const UNDERTAKER_AUTO_DODGE_REARM_MS: usize = 900;
 const UNDERTAKER_DAMAGE_ATK_ID_OFFSET: usize = 0x40;
 const UNDERTAKER_DAMAGE_ATK_TABLE_OFFSET: usize = 0x44;
 const UNDERTAKER_PENDING_UNKNOWN_ATTACK: u64 = 1;
-const REVENANT_SUMMON_RANGE_PATTERN: [Option<u8>; 15] = [
-    Some(0x48),
-    Some(0x8B),
-    Some(0x47),
-    None,
-    Some(0xF3),
-    Some(0x0F),
-    Some(0x10),
-    Some(0x90),
-    None,
-    None,
-    None,
-    None,
-    Some(0x0F),
-    Some(0x2F),
-    Some(0xD0),
-];
-const REVENANT_SUMMON_RANGE_COMISS_OFFSET: usize = 12;
 const REVENANT_SUMMON_RANGE_BUDDY_TYPE_ID: u32 = 0x7D0;
 const REVENANT_SUMMON_RANGE_OVERRIDE: f32 = 1000.0;
-const CAMERA_DIRECTED_POSITION_PATTERN: [Option<u8>; 11] = [
-    Some(0x0F),
-    Some(0x11),
-    Some(0x43),
-    Some(0x70),
-    Some(0xC7),
-    Some(0x43),
-    Some(0x7C),
-    Some(0x00),
-    Some(0x00),
-    Some(0x80),
-    Some(0x3F),
-];
 const CAMERA_DIRECTED_POSITION_OFFSET: usize = 0x70;
 const CAMERA_DIRECTED_VERTICAL_SCALE: f32 = 1.0;
 const CAMERA_DIRECTED_VERTICAL_BIAS_MIN: f32 = -0.045;
@@ -180,25 +83,12 @@ const MULTI_LOCK_LIVE_WEAPON_ASSIGN_WINDOW_SECONDS: f32 = 0.18;
 const MULTI_LOCK_LIVE_ALWAYS_GUIDE_PARAM_MIN: i32 = 40_000_000;
 const MULTI_LOCK_SPAWN_HOOK_PARAM_SUPPRESS_SECONDS: f32 = 0.75;
 const MULTI_LOCK_SCREEN_LENS_RADIUS_SCALE: f32 = 1.18;
-const BULLET_SPAWN_OWNER_OFFSET: usize = 0x0;
-const BULLET_SPAWN_BULLET_ID_OFFSET: usize = 0x14;
-const BULLET_SPAWN_TARGET_OFFSET: usize = 0x20;
-const CHR_MODULE_BAG_OFFSET: usize = 0x190;
-const MODULE_RESIST_OFFSET: usize = 0x20;
-const MODULE_DAMAGE_OFFSET: usize = 0x98;
 const DAMAGE_VALUE_OFFSETS: [usize; 5] = [0x230, 0x234, 0x238, 0x23C, 0x240];
 const DAMAGE_SCAN_START: usize = 0x200;
 const DAMAGE_SCAN_END: usize = 0x280;
 const DAMAGE_LOG_INTERVAL: f32 = 1.0;
 const DUCHESS_REPLAY_HISTORY_SECONDS: f32 = 3.5;
 const DUCHESS_REPLAY_HISTORY_CAP: usize = 512;
-const CHR_PHYSICS_PROXY_OFFSET: usize = 0x98;
-const CHR_PHYSICS_PROXY2_OFFSET: usize = 0xA0;
-const CHR_PHYSICS_COLLISION_SHAPE_OFFSET: usize = 0xB0;
-const CHR_INS_DEBUG_HASH_LEN: usize = 0x580;
-const CHR_DATA_DEBUG_HASH_LEN: usize = 0x260;
-const CHR_MSB_PARTS_DEBUG_HASH_LEN: usize = 0x50;
-const CHR_SET_ENTRY_DEBUG_HASH_LEN: usize = 0x10;
 const RECLUSE_LOCK_DEBUG_POINTS: bool = false;
 const RECLUSE_MARKER_HIT_HEIGHT_FACTOR: f32 = 0.55;
 const RECLUSE_MARKER_AABB_HEIGHT_FACTOR: f32 = 0.58;
@@ -213,6 +103,7 @@ type LockDebugPoints = [Option<[f32; 2]>; 5];
 #[derive(Default)]
 struct UndertakerHurtboxSensor {
     physics_module: usize,
+    identity: Option<shikifsrs_elden_ring::character_sets::CharacterIdentity>,
     baseline_hit_radius: Option<f32>,
     inflated: bool,
 }
@@ -226,7 +117,7 @@ enum UndertakerHitDispatchAction {
 
 #[derive(Clone, Copy)]
 struct MultiLockLiveWeaponGuidance {
-    target: FieldInsHandle,
+    target: HudHandle,
     created_at: Instant,
     expires_at: Instant,
 }
@@ -278,40 +169,35 @@ struct DuchessReplayEvent {
 
 fn install_damage_hook_once() {
     INSTALL_DAMAGE_HOOK.call_once(|| {
-        let program = Program::current();
-        let Some(hook_rva) = find_damage_process_pattern(program) else {
-            append_damage_log("[init] damage hook failed: pattern not found");
-            return;
+        let hook_site = match native_hooks::address(0) {
+            Ok(address) => address,
+            Err(error) => {
+                append_damage_log(&format!("[init] fixed Shiki hook site rejected: {error}"));
+                return;
+            }
         };
-        let hook_site = program.image().as_ptr() as usize + hook_rva;
         let hook = unsafe {
-            ilhook::x64::hook_closure_jmp_back(
-                hook_site,
-                |regs: *mut ilhook::x64::Registers| {
-                    let target_damage_module = (*regs).rcx as usize;
-                    let damage_data = (*regs).r8 as usize;
-                    DAMAGE_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
-                    DAMAGE_HOOK_LAST_TARGET.store(target_damage_module, Ordering::Relaxed);
-                    DAMAGE_HOOK_LAST_DATA.store(damage_data, Ordering::Relaxed);
-                    if let Some(element) = find_recluse_damage_element(damage_data) {
-                        record_recluse_damage_element(target_damage_module, element);
-                    }
-                    if let Some((_, damage)) = find_damage_candidate(damage_data) {
-                        record_damage_hook_event(target_damage_module, damage);
-                    }
-                    if is_chargeable_damage_event(target_damage_module, damage_data) {
-                        ULTIMATE_DAMAGE_EVENTS.fetch_add(1, Ordering::Relaxed);
-                    }
-                },
-                ilhook::x64::CallbackOption::None,
-                ilhook::x64::HookFlags::empty(),
-            )
+            native_hooks::install_back(0, |regs: *mut ilhook::x64::Registers| {
+                let target_damage_module = (*regs).rcx as usize;
+                let damage_data = (*regs).r8 as usize;
+                DAMAGE_HOOK_CALLS.fetch_add(1, Ordering::Relaxed);
+                DAMAGE_HOOK_LAST_TARGET.store(target_damage_module, Ordering::Relaxed);
+                DAMAGE_HOOK_LAST_DATA.store(damage_data, Ordering::Relaxed);
+                if let Some(element) = find_recluse_damage_element(damage_data) {
+                    record_recluse_damage_element(target_damage_module, element);
+                }
+                if let Some((_, damage)) = find_damage_candidate(damage_data) {
+                    record_damage_hook_event(target_damage_module, damage);
+                }
+                if is_chargeable_damage_event(target_damage_module, damage_data) {
+                    ULTIMATE_DAMAGE_EVENTS.fetch_add(1, Ordering::Relaxed);
+                }
+            })
         };
 
         match hook {
-            Ok(hook) => {
+            Ok(()) => {
                 append_damage_log(&format!("[init] damage hook installed at 0x{hook_site:X}"));
-                std::mem::forget(hook);
             }
             Err(error) => {
                 append_damage_log(&format!(
@@ -324,28 +210,21 @@ fn install_damage_hook_once() {
 
 fn install_undertaker_auto_dodge_hook_once() {
     INSTALL_UNDERTAKER_AUTO_DODGE_HOOK.call_once(|| {
-        let program = Program::current();
-        let Some(dispatch_rva) = find_undertaker_hit_dispatch_pattern(program) else {
-            append_damage_log("[init] Undertaker HitIns dispatcher pattern was not unique");
-            return;
+        let hook_site = match native_hooks::address(1) {
+            Ok(address) => address,
+            Err(error) => {
+                append_damage_log(&format!("[init] fixed Shiki hook site rejected: {error}"));
+                return;
+            }
         };
-
-        let image_base = program.image().as_ptr() as usize;
-        let hook_site = image_base + dispatch_rva;
         let hook = unsafe {
-            ilhook::x64::hook_closure_jmp_to_ret(
-                hook_site,
-                |regs: *mut ilhook::x64::Registers, original: usize| {
-                    undertaker_hit_dispatch_destination(regs, original)
-                },
-                ilhook::x64::CallbackOption::None,
-                ilhook::x64::HookFlags::empty(),
-            )
+            native_hooks::install_ret(1, |regs: *mut ilhook::x64::Registers, original: usize| {
+                undertaker_hit_dispatch_destination(regs, original)
+            })
         };
 
         match hook {
-            Ok(hook) => {
-                std::mem::forget(hook);
+            Ok(()) => {
                 UNDERTAKER_AUTO_DODGE_AVAILABLE.store(true, Ordering::Release);
                 append_damage_log(&format!(
                     "[init] Undertaker auto-dodge hook installed at 0x{hook_site:X}"
@@ -393,9 +272,7 @@ fn undertaker_hit_dispatch_destination(
 
     match action {
         UndertakerHitDispatchAction::Forward => original,
-        UndertakerHitDispatchAction::Reject => {
-            reject_undertaker_hit_dispatch as *const () as usize
-        }
+        UndertakerHitDispatchAction::Reject => reject_undertaker_hit_dispatch as *const () as usize,
         UndertakerHitDispatchAction::Trigger => {
             let pending_hit = capture_undertaker_pending_attack(damage_data);
             if UNDERTAKER_AUTO_DODGE_PENDING_HIT
@@ -418,6 +295,7 @@ fn undertaker_hit_dispatch_destination(
     }
 }
 
+#[allow(clippy::too_many_arguments, reason = "Preserve the independently tested hit-admission policy inputs")]
 fn undertaker_hit_dispatch_action(
     target_damage_module: usize,
     local_damage_module: usize,
@@ -461,46 +339,74 @@ fn set_undertaker_auto_dodge_armed(armed: bool) {
 
 fn clear_undertaker_auto_dodge_latches() {
     UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
-    UNDERTAKER_AUTO_DODGE_PENDING_HIT.store(0, Ordering::Release);
+    if !UNDERTAKER_AUTO_DODGE_DISPATCH_BLOCKED.load(Ordering::Acquire) {
+        UNDERTAKER_AUTO_DODGE_PENDING_HIT.store(0, Ordering::Release);
+    }
     UNDERTAKER_AUTO_DODGE_SUPPRESS_UNTIL_MS.store(0, Ordering::Release);
     UNDERTAKER_AUTO_DODGE_REARM_AT_MS.store(0, Ordering::Release);
 }
 
 fn update_undertaker_auto_dodge_before_behavior() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        set_undertaker_auto_dodge_armed(false);
-        clear_undertaker_hurtbox_sensor_without_restore();
-        return;
+    let player = match native_world::primary_selection() {
+        Ok(Some(selection)) => selection.player,
+        Ok(None) => {
+            set_undertaker_auto_dodge_armed(false);
+            clear_undertaker_hurtbox_sensor_without_restore();
+            return;
+        }
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD dodge primary selection rejected: {error}");
+            return;
+        }
     };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        set_undertaker_auto_dodge_armed(false);
-        clear_undertaker_hurtbox_sensor_without_restore();
-        return;
+    let effects = match native_character::effects(player.address) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD dodge effects rejected: {error}");
+            return;
+        }
     };
-
     if UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire)
-        && !chr_has_speffect(&player.chr_ins, SP_UNDERTAKER_ENHANCED_SKILL_BUFF)
+        && !effects.contains(&SP_UNDERTAKER_ENHANCED_SKILL_BUFF)
     {
         set_undertaker_auto_dodge_armed(false);
-        clear_undertaker_dodge_effects(player);
+        native_character::report_effect_result(clear_undertaker_dodge_effects(player));
     }
     update_undertaker_hurtbox_sensor(player);
     apply_pending_undertaker_auto_dodge(player);
 }
 
-fn update_undertaker_hurtbox_sensor(player: &mut PlayerIns) {
-    let physics = player.chr_ins.modules.as_mut().physics.as_mut();
-    let physics_module = physics as *mut _ as usize;
+fn update_undertaker_hurtbox_sensor(
+    player: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+) {
+    let source = match native_character::scalar(
+        player.address,
+        shikifsrs_elden_ring::character_scalars::CharacterScalar::CharacterHitRadius,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD hurtbox radius copy rejected: {error}");
+            UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+            return;
+        }
+    };
+    if source.key.character != player {
+        eprintln!("ShikiFSRS HUD dodge radius full identity changed");
+        UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+        return;
+    }
+    let radius = f32::from_bits(source.bits);
+    let physics_module = source.storage.address as usize;
     let Ok(mut sensor) = UNDERTAKER_HURTBOX_SENSOR.lock() else {
         UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
         return;
     };
 
-    if sensor.physics_module != physics_module {
+    if sensor.physics_module != physics_module || sensor.identity != Some(source.key.character) {
         *sensor = UndertakerHurtboxSensor {
             physics_module,
-            baseline_hit_radius: valid_undertaker_hit_radius(physics.hit_radius)
-                .then_some(physics.hit_radius),
+            identity: Some(source.key.character),
+            baseline_hit_radius: valid_undertaker_hit_radius(radius).then_some(radius),
             inflated: false,
         };
     }
@@ -512,11 +418,21 @@ fn update_undertaker_hurtbox_sensor(player: &mut PlayerIns) {
     let should_inflate = armed && !cooling_down;
 
     if should_inflate {
-        if sensor.baseline_hit_radius.is_none() && valid_undertaker_hit_radius(physics.hit_radius) {
-            sensor.baseline_hit_radius = Some(physics.hit_radius);
+        if sensor.baseline_hit_radius.is_none() && valid_undertaker_hit_radius(radius) {
+            sensor.baseline_hit_radius = Some(radius);
         }
         if let Some(baseline) = sensor.baseline_hit_radius {
-            physics.hit_radius = undertaker_inflated_hit_radius(baseline);
+            // SAFETY: Native callback retains the exact original scalar/module graph and
+            // exclusive initialized writable phase. The SDK compares this copied source again.
+            if let Err(error) = unsafe {
+                native_character::replace_scalar(source, undertaker_inflated_hit_radius(baseline))
+            } {
+                eprintln!(
+                    "ShikiFSRS HUD radius inflation failed or uncertain; receipt retained: {error}"
+                );
+                UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+                return;
+            }
             sensor.inflated = true;
             UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(true, Ordering::Release);
             return;
@@ -525,7 +441,20 @@ fn update_undertaker_hurtbox_sensor(player: &mut PlayerIns) {
 
     if sensor.inflated {
         if let Some(baseline) = sensor.baseline_hit_radius {
-            physics.hit_radius = baseline;
+            // Refuse to overwrite a later owner's different value during restoration.
+            if source.bits != undertaker_inflated_hit_radius(baseline).to_bits() {
+                eprintln!("ShikiFSRS HUD radius restore conflict; baseline retained");
+                UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+                return;
+            }
+            // SAFETY: Same exact scalar identity and exclusive graph contract; no Drop cleanup.
+            if let Err(error) = unsafe { native_character::replace_scalar(source, baseline) } {
+                eprintln!(
+                    "ShikiFSRS HUD radius restore failed or uncertain; receipt retained: {error}"
+                );
+                UNDERTAKER_AUTO_DODGE_SENSOR_ACTIVE.store(false, Ordering::Release);
+                return;
+            }
         }
         sensor.inflated = false;
     }
@@ -596,36 +525,66 @@ fn undertaker_dodge_effects(
     [direction_effect, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)]
 }
 
-fn clear_undertaker_dodge_effects(player: &mut PlayerIns) {
-    player.chr_ins.remove_speffect(SP_UNDERTAKER_AUTO_DODGE_TRIGGER);
-    for effect in SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS {
-        player.chr_ins.remove_speffect(effect);
+fn clear_undertaker_dodge_effects(
+    player: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+) -> shikifsrs_runtime::Result<()> {
+    for effect in
+        std::iter::once(SP_UNDERTAKER_AUTO_DODGE_TRIGGER).chain(SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS)
+    {
+        native_world::revalidate(player)?;
+        // SAFETY: Original permitted callback retains the full effect/unlink/PARAM graph.
+        unsafe { native_character::remove_effect(player.address, effect) }?;
     }
+    Ok(())
 }
 
-fn apply_pending_undertaker_auto_dodge(player: &mut PlayerIns) {
-    let pending_hit = UNDERTAKER_AUTO_DODGE_PENDING_HIT.swap(0, Ordering::AcqRel);
-    if pending_hit == 0 {
+fn apply_pending_undertaker_auto_dodge(
+    player: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+) {
+    let pending_hit = UNDERTAKER_AUTO_DODGE_PENDING_HIT.load(Ordering::Acquire);
+    if pending_hit == 0 || !UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire) {
         return;
     }
-    if !UNDERTAKER_AUTO_DODGE_ARMED.load(Ordering::Acquire) {
+    if let Err(error) = native_world::revalidate(player) {
+        eprintln!("ShikiFSRS HUD dodge target identity rejected: {error}");
         return;
     }
-
-    let effects = undertaker_dodge_effects(pending_hit, |table, row_id| {
-        let repository = unsafe { SoloParamRepository::instance() }.ok()?;
-        let atk = match table {
-            0 => repository.get::<AtkParam_Npc>(row_id),
-            1 => repository.get::<AtkParam_Pc>(row_id),
-            _ => None,
-        }?;
-        Some(atk.atk_dir_for_sfx())
-    });
-    clear_undertaker_dodge_effects(player);
-    // Publish the direction before the generic request HKS consumes.
+    if UNDERTAKER_AUTO_DODGE_DISPATCH_BLOCKED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    // The original input stays published before native entry and through errors or interruption.
+    // Failed native receipts remain in the real character adapter; never replay this sequence.
+    let effects = undertaker_dodge_effects(pending_hit, native_parameters::attack_direction);
+    if let Err(error) = clear_undertaker_dodge_effects(player) {
+        eprintln!("ShikiFSRS HUD dodge cleanup failed; intent and receipts retained: {error}");
+        return;
+    }
     for effect in effects.into_iter().flatten() {
-        player.apply_speffect(effect, true);
+        if let Err(error) = native_world::revalidate(player) {
+            eprintln!("ShikiFSRS HUD dodge identity changed; intent retained: {error}");
+            return;
+        }
+        // SAFETY: Same full exclusive effect/native allocator graph. Direction precedes request.
+        if let Err(error) = unsafe { native_character::apply_effect(player.address, effect, true) }
+        {
+            eprintln!(
+                "ShikiFSRS HUD dodge submission failed; intent and actual receipt retained: {error}"
+            );
+            return;
+        }
     }
+    if UNDERTAKER_AUTO_DODGE_PENDING_HIT
+        .compare_exchange(pending_hit, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        eprintln!("ShikiFSRS HUD dodge intent changed; session remains closed");
+        return;
+    }
+    UNDERTAKER_AUTO_DODGE_DISPATCH_BLOCKED.store(false, Ordering::Release);
+    // Count the completed submission sequence, not native gameplay completion.
     UNDERTAKER_AUTO_DODGE_PULSES.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -641,43 +600,36 @@ fn undertaker_auto_dodge_probe() -> (bool, bool, bool, u32, u32) {
 
 fn install_revenant_summon_range_hook_once() {
     INSTALL_REVENANT_SUMMON_RANGE_HOOK.call_once(|| {
-        let program = Program::current();
-        let Some(pattern_rva) = find_revenant_summon_range_pattern(program) else {
-            append_damage_log("[init] revenant summon range hook failed: pattern not found");
-            return;
+        let hook_site = match native_hooks::address(2) {
+            Ok(address) => address,
+            Err(error) => {
+                append_damage_log(&format!("[init] fixed Shiki hook site rejected: {error}"));
+                return;
+            }
         };
-        let hook_site = program.image().as_ptr() as usize
-            + pattern_rva
-            + REVENANT_SUMMON_RANGE_COMISS_OFFSET;
         let hook = unsafe {
-            ilhook::x64::hook_closure_jmp_back(
-                hook_site,
-                |regs: *mut ilhook::x64::Registers| {
-                    if !REVENANT_SUMMON_RANGE_ACTIVE.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let range_data = (*regs).rax as usize;
-                    if range_data == 0 {
-                        return;
-                    }
-                    if *(range_data as *const u32) != REVENANT_SUMMON_RANGE_BUDDY_TYPE_ID {
-                        return;
-                    }
+            native_hooks::install_back(2, |regs: *mut ilhook::x64::Registers| {
+                if !REVENANT_SUMMON_RANGE_ACTIVE.load(Ordering::Relaxed) {
+                    return;
+                }
+                let range_data = (*regs).rax as usize;
+                if range_data == 0 {
+                    return;
+                }
+                if *(range_data as *const u32) != REVENANT_SUMMON_RANGE_BUDDY_TYPE_ID {
+                    return;
+                }
 
-                    let override_bits = REVENANT_SUMMON_RANGE_OVERRIDE.to_bits() as u128;
-                    (*regs).xmm2 = ((*regs).xmm2 & !0xFFFF_FFFFu128) | override_bits;
-                },
-                ilhook::x64::CallbackOption::None,
-                ilhook::x64::HookFlags::empty(),
-            )
+                let override_bits = REVENANT_SUMMON_RANGE_OVERRIDE.to_bits() as u128;
+                (*regs).xmm2 = ((*regs).xmm2 & !0xFFFF_FFFFu128) | override_bits;
+            })
         };
 
         match hook {
-            Ok(hook) => {
+            Ok(()) => {
                 append_damage_log(&format!(
                     "[init] revenant summon range hook installed at 0x{hook_site:X}"
                 ));
-                std::mem::forget(hook);
             }
             Err(error) => {
                 append_damage_log(&format!(
@@ -690,29 +642,24 @@ fn install_revenant_summon_range_hook_once() {
 
 fn install_camera_directed_position_hook_once() {
     INSTALL_CAMERA_DIRECTED_POSITION_HOOK.call_once(|| {
-        let program = Program::current();
-        let Some(pattern_rva) = find_camera_directed_position_pattern(program) else {
-            append_damage_log("[init] camera directed position hook failed: pattern not found");
-            return;
+        let hook_site = match native_hooks::address(3) {
+            Ok(address) => address,
+            Err(error) => {
+                append_damage_log(&format!("[init] fixed Shiki hook site rejected: {error}"));
+                return;
+            }
         };
-        let hook_site = program.image().as_ptr() as usize + pattern_rva;
         let hook = unsafe {
-            ilhook::x64::hook_closure_jmp_back(
-                hook_site,
-                |regs: *mut ilhook::x64::Registers| {
-                    apply_camera_directed_position_hook(regs);
-                },
-                ilhook::x64::CallbackOption::None,
-                ilhook::x64::HookFlags::empty(),
-            )
+            native_hooks::install_back(3, |regs: *mut ilhook::x64::Registers| {
+                apply_camera_directed_position_hook(regs);
+            })
         };
 
         match hook {
-            Ok(hook) => {
+            Ok(()) => {
                 append_damage_log(&format!(
                     "[init] camera directed position hook installed at 0x{hook_site:X}"
                 ));
-                std::mem::forget(hook);
             }
             Err(error) => {
                 append_damage_log(&format!(
@@ -725,24 +672,24 @@ fn install_camera_directed_position_hook_once() {
 
 fn install_multi_lock_bullet_hook_once() {
     INSTALL_MULTI_LOCK_BULLET_HOOK.call_once(|| {
-        let hook_site = Program::current().image().as_ptr() as usize + bullet_spawn_rva() as usize;
+        let hook_site = match native_hooks::address(4) {
+            Ok(address) => address,
+            Err(error) => {
+                append_damage_log(&format!("[init] fixed Shiki hook site rejected: {error}"));
+                return;
+            }
+        };
         let hook = unsafe {
-            ilhook::x64::hook_closure_jmp_back(
-                hook_site,
-                |regs: *mut ilhook::x64::Registers| {
-                    apply_bullet_spawn_hook(regs);
-                },
-                ilhook::x64::CallbackOption::None,
-                ilhook::x64::HookFlags::empty(),
-            )
+            native_hooks::install_back(4, |regs: *mut ilhook::x64::Registers| {
+                apply_bullet_spawn_hook(regs);
+            })
         };
 
         match hook {
-            Ok(hook) => {
+            Ok(()) => {
                 append_damage_log(&format!(
                     "[init] multi lock bullet hook installed at 0x{hook_site:X}"
                 ));
-                std::mem::forget(hook);
             }
             Err(error) => {
                 append_damage_log(&format!(
@@ -757,58 +704,7 @@ fn set_revenant_summon_range_hook_active(active: bool) {
     REVENANT_SUMMON_RANGE_ACTIVE.store(active, Ordering::Relaxed);
 }
 
-fn find_revenant_summon_range_pattern(program: Program) -> Option<usize> {
-    let image = program.image();
-    let code_range = program.headers().code_range();
-    let start = code_range.start as usize;
-    let end = (code_range.end as usize).min(image.len());
-    find_pattern_in_range(image, start, end, &REVENANT_SUMMON_RANGE_PATTERN)
-}
-
-fn find_damage_process_pattern(program: Program) -> Option<usize> {
-    let image = program.image();
-    let code_range = program.headers().code_range();
-    let start = code_range.start as usize;
-    let end = (code_range.end as usize).min(image.len());
-    find_pattern_in_range(image, start, end, &DAMAGE_PROCESS_PATTERN)
-}
-
-fn find_undertaker_hit_dispatch_pattern(program: Program) -> Option<usize> {
-    let image = program.image();
-    let code_range = program.headers().code_range();
-    let start = code_range.start as usize;
-    let end = (code_range.end as usize).min(image.len());
-    find_unique_pattern_in_range(image, start, end, &UNDERTAKER_HIT_DISPATCH_PATTERN)
-}
-
-fn find_camera_directed_position_pattern(program: Program) -> Option<usize> {
-    let image = program.image();
-    let code_range = program.headers().code_range();
-    let start = code_range.start as usize;
-    let end = (code_range.end as usize).min(image.len());
-    find_pattern_in_range(image, start, end, &CAMERA_DIRECTED_POSITION_PATTERN)
-}
-
-fn find_pattern_in_range(
-    image: &[u8],
-    start: usize,
-    end: usize,
-    pattern: &[Option<u8>],
-) -> Option<usize> {
-    if pattern.is_empty() || end <= start || end - start < pattern.len() {
-        return None;
-    }
-    image[start..end]
-        .windows(pattern.len())
-        .position(|window| {
-            window
-                .iter()
-                .zip(pattern.iter())
-                .all(|(byte, expected)| expected.map_or(true, |expected| *byte == expected))
-        })
-        .map(|offset| start + offset)
-}
-
+#[cfg(test)]
 fn find_unique_pattern_in_range(
     image: &[u8],
     start: usize,
@@ -825,7 +721,7 @@ fn find_unique_pattern_in_range(
             window
                 .iter()
                 .zip(pattern.iter())
-                .all(|(byte, expected)| expected.map_or(true, |expected| *byte == expected))
+                .all(|(byte, expected)| expected.is_none_or(|expected| *byte == expected))
         })
         .map(|(offset, _)| start + offset);
     let first = matches.next()?;
@@ -837,25 +733,32 @@ fn apply_bullet_spawn_hook(regs: *mut ilhook::x64::Registers) {
         return;
     }
 
-    let manager = unsafe { (*regs).rcx as *mut CSBulletManager };
-    let spawn_data = unsafe { (*regs).r8 as *mut BulletSpawnData };
-    if manager.is_null() || spawn_data.is_null() {
+    // Native hook input is copied through the independent consumed-span reader.
+    let manager = unsafe { (*regs).rcx };
+    let input_address = unsafe { (*regs).r8 };
+    if manager == 0
+        || input_address == 0
+        || MULTI_LOCK_BULLET_SPAWNING_CLONE.load(Ordering::Relaxed)
+    {
         return;
     }
-
-    let bullet_id = unsafe {
-        read_i32((spawn_data as usize) + BULLET_SPAWN_BULLET_ID_OFFSET)
+    let source = match native_bullets::capture(input_address) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD spawn input rejected: {error}");
+            return;
+        }
     };
-    if bullet_id < 0 || MULTI_LOCK_BULLET_SPAWNING_CLONE.load(Ordering::Relaxed) {
+    let bullet_id = source.input.bullet_parameter_id();
+    if bullet_id < 0 {
         return;
     }
-
-    let owner = unsafe { read_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_OWNER_OFFSET) };
-    let original_target =
-        unsafe { read_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_TARGET_OFFSET) };
+    let owner = HudHandle::from_native(source.input.owner_identifier());
+    let original_target = HudHandle::from_native(source.input.target_identifier());
     let Some(target_plan) = multi_lock_bullet_targets(owner, original_target, manager) else {
         return;
     };
+
     record_multi_lock_spawn_hook_bullet_param(bullet_id);
     let targets = target_plan.targets;
     if targets.is_empty() {
@@ -865,18 +768,19 @@ fn apply_bullet_spawn_hook(regs: *mut ilhook::x64::Registers) {
     let cursor = MULTI_LOCK_BULLET_TARGET_CURSOR.fetch_add(1, Ordering::Relaxed);
     let target = targets[cursor % targets.len()];
     if target != original_target {
-        unsafe {
-            write_field_ins_handle((spawn_data as usize) + BULLET_SPAWN_TARGET_OFFSET, target);
+        // SAFETY: Original spawn callback retains the full target/allocator graph and writable input.
+        if let Err(error) = unsafe { native_bullets::retarget(source.clone(), target.raw()) } {
+            eprintln!("ShikiFSRS HUD spawn retarget retained: {error}");
+            return;
         }
     }
-
     if target_plan.spawn_extra_clones {
-        spawn_multi_lock_extra_bullets(manager, spawn_data, &targets, target);
+        spawn_multi_lock_extra_bullets(manager, &source, &targets, target);
     }
 }
 
 struct MultiLockBulletTargetPlan {
-    targets: Vec<FieldInsHandle>,
+    targets: Vec<HudHandle>,
     spawn_extra_clones: bool,
 }
 
@@ -887,24 +791,24 @@ struct MultiLockConfig {
 }
 
 fn multi_lock_bullet_targets(
-    owner: FieldInsHandle,
-    original_target: FieldInsHandle,
-    bullet_manager: *mut CSBulletManager,
+    owner: HudHandle,
+    original_target: HudHandle,
+    bullet_manager: u64,
 ) -> Option<MultiLockBulletTargetPlan> {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
+    let Ok(world_chr_man) = HudWorld::observe() else {
         return None;
     };
-    let player = world_chr_man.main_player.as_ref()?;
-    let owner_is_player = owner == player.chr_ins.field_ins_handle;
+    let player = world_chr_man.player?;
+    let owner_is_player = owner == player.actor.handle;
     let owner_belongs_to_player = owner_is_player
-        || bullet_owner_belongs_to_player(owner, player.chr_ins.field_ins_handle, bullet_manager);
+        || bullet_owner_belongs_to_player(owner, player.actor.handle, bullet_manager);
     let weapon_behavior_fallback = !owner_belongs_to_player
-        && multi_lock_weapon_behavior_fallback(world_chr_man, player.as_ref(), &owner, original_target);
+        && multi_lock_weapon_behavior_fallback(&world_chr_man, &player, &owner, original_target);
     if !owner_belongs_to_player && !weapon_behavior_fallback {
         return None;
     }
 
-    multi_lock_targets_for_player(world_chr_man, player.as_ref(), original_target).map(|targets| {
+    multi_lock_targets_for_player(&world_chr_man, &player, original_target).map(|targets| {
         MultiLockBulletTargetPlan {
             targets,
             spawn_extra_clones: owner_is_player || weapon_behavior_fallback,
@@ -913,90 +817,84 @@ fn multi_lock_bullet_targets(
 }
 
 fn multi_lock_weapon_behavior_fallback(
-    world_chr_man: &WorldChrMan,
-    player: &PlayerIns,
-    owner: &FieldInsHandle,
-    original_target: FieldInsHandle,
+    world_chr_man: &HudWorld,
+    player: &HudPlayer,
+    owner: &HudHandle,
+    original_target: HudHandle,
 ) -> bool {
-    if owner.selector.field_ins_type() == Some(FieldInsType::Bullet) || original_target.is_empty() {
+    if owner.is_bullet() || original_target.is_empty() {
         return false;
     }
 
-    if original_target == player.chr_ins.field_ins_handle {
+    if original_target == player.actor.handle {
         return false;
     }
 
-    let Some(target) = world_chr_man.chr_ins_by_handle(&original_target) else {
+    let Some(target) = hud_actor_by_handle(world_chr_man, &original_target) else {
         return false;
     };
-    if scholar_reject_reason(target).is_some() {
+    if scholar_reject_reason(&target).is_some() {
         return false;
     }
-    let Some(screen_pos) = scholar_target_screen_pos(target) else {
+    let Some(screen_pos) = scholar_target_screen_pos(&target) else {
         return false;
     };
     if !multi_lock_screen_pos_in_lens(screen_pos) {
         return false;
     }
-    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
-    let target_pos = scholar_chr_physics_position(target);
+    let player_pos = hud_physics_position(&player.actor);
+    let target_pos = scholar_chr_physics_position(&target);
     let target_distance = distance_havok(player_pos, target_pos);
     scholar_in_lock_target_volume(player, target_pos, target_distance)
-        && scholar_has_line_of_sight(target, player)
+        && scholar_has_line_of_sight(&target, player)
 }
 
+struct MultiLockCloneGuard;
+impl Drop for MultiLockCloneGuard {
+    fn drop(&mut self) {
+        MULTI_LOCK_BULLET_SPAWNING_CLONE.store(false, Ordering::Relaxed);
+    }
+}
 fn spawn_multi_lock_extra_bullets(
-    manager: *mut CSBulletManager,
-    spawn_data: *const BulletSpawnData,
-    targets: &[FieldInsHandle],
-    primary_target: FieldInsHandle,
+    manager: u64,
+    source: &shikifsrs_elden_ring::bullet_spawn::BulletSpawnObservation,
+    targets: &[HudHandle],
+    primary_target: HudHandle,
 ) {
     if targets.len() <= 1 {
         return;
     }
-
-    MULTI_LOCK_BULLET_SPAWNING_CLONE.store(true, Ordering::Relaxed);
+    if MULTI_LOCK_BULLET_SPAWNING_CLONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _guard = MultiLockCloneGuard;
     for target in targets
         .iter()
         .copied()
         .filter(|target| *target != primary_target)
         .take(MULTI_LOCK_BULLET_EXTRA_CLONES_PER_SPAWN)
     {
-        let mut cloned_spawn_data = unsafe { clone_bullet_spawn_data(spawn_data) };
-        unsafe {
-            write_field_ins_handle(
-                (&mut cloned_spawn_data as *mut BulletSpawnData as usize)
-                    + BULLET_SPAWN_TARGET_OFFSET,
-                target,
-            );
+        let mut cloned = source.clone();
+        cloned.input = cloned.input.with_target(target.raw());
+        // SAFETY: Captured consumed fields retain the original callback's opaque references.
+        // Native recursion reaches apply_bullet_spawn_hook and returns before borrowing this session.
+        if let Err(error) = unsafe { native_bullets::spawn(manager, cloned) } {
+            eprintln!("ShikiFSRS HUD clone spawn retained: {error}");
+            break;
         }
-        let _ = unsafe { (&mut *manager).spawn_bullet(&cloned_spawn_data) };
-    }
-    MULTI_LOCK_BULLET_SPAWNING_CLONE.store(false, Ordering::Relaxed);
-}
-
-unsafe fn clone_bullet_spawn_data(spawn_data: *const BulletSpawnData) -> BulletSpawnData {
-    let mut cloned = std::mem::MaybeUninit::<BulletSpawnData>::uninit();
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            spawn_data as *const u8,
-            cloned.as_mut_ptr() as *mut u8,
-            std::mem::size_of::<BulletSpawnData>(),
-        );
-        cloned.assume_init()
     }
 }
 
 fn update_multi_lock_live_bullets() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
+    let Ok(world_chr_man) = HudWorld::observe() else {
         MULTI_LOCK_LIVE_BULLET_COUNT.store(0, Ordering::Relaxed);
         return;
     };
-    let Some(player) = world_chr_man.main_player.as_ref() else {
+    let Some(player) = world_chr_man.player else {
         MULTI_LOCK_LIVE_BULLET_COUNT.store(0, Ordering::Relaxed);
         return;
     };
-    if multi_lock_target_limit(&player.chr_ins).is_none() {
+    if multi_lock_target_limit(&player.actor).is_none() {
         MULTI_LOCK_LIVE_BULLET_COUNT.store(0, Ordering::Relaxed);
         MULTI_LOCK_LIVE_GUIDED_BULLET_COUNT.store(0, Ordering::Relaxed);
         if let Ok(mut seen) = MULTI_LOCK_LIVE_BULLET_SEEN.lock() {
@@ -1008,9 +906,9 @@ fn update_multi_lock_live_bullets() {
         return;
     }
     let target_handles =
-        multi_lock_targets_for_player(world_chr_man, player.as_ref(), player.locked_on_enemy)
+        multi_lock_targets_for_player(&world_chr_man, &player, player.locked_target)
             .unwrap_or_default();
-    let Ok(bullet_manager) = (unsafe { CSBulletManager::instance_mut() }) else {
+    let Ok(bullet_list) = native_bullets::observe() else {
         MULTI_LOCK_LIVE_BULLET_COUNT.store(0, Ordering::Relaxed);
         return;
     };
@@ -1024,19 +922,21 @@ fn update_multi_lock_live_bullets() {
     let mut guided_count = 0u32;
     let mut guidance = MULTI_LOCK_LIVE_WEAPON_GUIDANCE.lock().ok();
 
-    for bullet in bullet_manager.bullets_mut() {
-        let handle = bullet.field_ins_handle;
+    for bullet in &bullet_list.members {
+        let handle = native_bullets::key(bullet);
         current.insert(handle);
         let param_id = multi_lock_bullet_param_id(bullet);
         let is_new = !previous.contains(&handle);
-        let can_assign_guidance = is_new || bullet.time_alive <= MULTI_LOCK_LIVE_WEAPON_ASSIGN_WINDOW_SECONDS;
+        let can_assign_guidance = is_new
+            || f32::from_bits(bullet.elapsed_step_bits)
+                <= MULTI_LOCK_LIVE_WEAPON_ASSIGN_WINDOW_SECONDS;
         let guided_target = if can_assign_guidance
             && guidance
                 .as_ref()
                 .is_none_or(|guidance| !guidance.contains_key(&handle))
         {
             assign_multi_lock_live_weapon_bullet_target(
-                player.chr_ins.field_ins_handle,
+                player.actor.handle,
                 &target_handles,
                 bullet,
                 param_id,
@@ -1049,9 +949,7 @@ fn update_multi_lock_live_bullets() {
                             target: *target,
                             created_at: now,
                             expires_at: now
-                                + Duration::from_secs_f32(
-                                    MULTI_LOCK_LIVE_WEAPON_GUIDANCE_SECONDS,
-                                ),
+                                + Duration::from_secs_f32(MULTI_LOCK_LIVE_WEAPON_GUIDANCE_SECONDS),
                         },
                     );
                 }
@@ -1070,12 +968,10 @@ fn update_multi_lock_live_bullets() {
             })
         };
 
-        if let Some((target, mix)) = guided_target {
-            if apply_multi_lock_live_weapon_bullet_direction(world_chr_man, bullet, target, mix) {
+        if let Some((target, mix)) = guided_target
+            && apply_multi_lock_live_weapon_bullet_direction(&world_chr_man, bullet, target, mix) {
                 guided_count += 1;
             }
-        }
-
     }
 
     MULTI_LOCK_LIVE_BULLET_COUNT.store(current.len() as u32, Ordering::Relaxed);
@@ -1090,13 +986,13 @@ fn update_multi_lock_live_bullets() {
 }
 
 fn assign_multi_lock_live_weapon_bullet_target(
-    player_handle: FieldInsHandle,
-    targets: &[FieldInsHandle],
-    bullet: &eldenring::cs::CSBulletIns,
+    player_handle: HudHandle,
+    targets: &[HudHandle],
+    bullet: &shikifsrs_elden_ring::bullets::BulletObservation,
     param_id: i32,
-) -> Option<FieldInsHandle> {
+) -> Option<HudHandle> {
     if !multi_lock_should_guide_live_bullet_param(param_id)
-        || bullet.targeting_owner.owner_chr_handle != player_handle
+        || bullet.targeting_owner_identifier != player_handle.raw()
         || targets.is_empty()
     {
         return None;
@@ -1139,99 +1035,68 @@ fn multi_lock_should_guide_live_bullet_param(param_id: i32) -> bool {
 }
 
 fn apply_multi_lock_live_weapon_bullet_direction(
-    world_chr_man: &WorldChrMan,
-    bullet: &mut eldenring::cs::CSBulletIns,
-    target_handle: FieldInsHandle,
+    world_chr_man: &HudWorld,
+    bullet: &shikifsrs_elden_ring::bullets::BulletObservation,
+    target_handle: HudHandle,
     mix: f32,
 ) -> bool {
-    let mix = mix.clamp(0.0, 1.0);
-    if mix <= 0.001 {
-        return false;
-    }
-
-    let Some(target) = world_chr_man.chr_ins_by_handle(&target_handle) else {
+    let Some(target) = hud_actor_by_handle(world_chr_man, &target_handle) else {
         return false;
     };
-
-    let target_pos = scholar_target_havok_position(target, 0.55);
-    let bullet_pos = bullet.physics.position;
-    let dx = target_pos.0 - bullet_pos.0;
-    let dy = target_pos.1 - bullet_pos.1;
-    let dz = target_pos.2 - bullet_pos.2;
-    let len = (dx * dx + dy * dy + dz * dz).sqrt();
-    if !len.is_finite() || len < 0.001 {
+    let Some(target_pos) = scholar_target_havok_position(&target, 0.55) else {
         return false;
-    }
-
-    let velocity = bullet.physics.velocity;
-    let speed =
-        (velocity.0 * velocity.0 + velocity.1 * velocity.1 + velocity.2 * velocity.2).sqrt();
-    let speed = if speed.is_finite() && speed > 0.1 {
-        speed
-    } else {
-        24.0
     };
-
-    let original_dir = if speed > 0.001 {
-        (velocity.0 / speed, velocity.1 / speed, velocity.2 / speed)
-    } else {
-        (dx / len, dy / len, dz / len)
-    };
-    let target_dir = (dx / len, dy / len, dz / len);
-    let mixed_x = original_dir.0 * (1.0 - mix) + target_dir.0 * mix;
-    let mixed_y = original_dir.1 * (1.0 - mix) + target_dir.1 * mix;
-    let mixed_z = original_dir.2 * (1.0 - mix) + target_dir.2 * mix;
-    let mixed_len = (mixed_x * mixed_x + mixed_y * mixed_y + mixed_z * mixed_z).sqrt();
-    if !mixed_len.is_finite() || mixed_len < 0.001 {
+    let Some(xyz) =
+        native_bullets::guidance_velocity(bullet, [target_pos.0, target_pos.1, target_pos.2], mix)
+    else {
         return false;
+    };
+    // SAFETY: Actual callback retains this exact bullet lifetime and exclusive writable XYZ extent.
+    match unsafe { native_bullets::velocity(*bullet, xyz) } {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD bullet velocity retained: {error}");
+            false
+        }
     }
-
-    bullet.physics.velocity = DirectionalVector(
-        mixed_x / mixed_len * speed,
-        mixed_y / mixed_len * speed,
-        mixed_z / mixed_len * speed,
-        velocity.3,
-    );
-    true
 }
 
-fn multi_lock_bullet_param_id(bullet: &eldenring::cs::CSBulletIns) -> i32 {
-    let fly = bullet.fly_state.base.param.param_id;
+fn multi_lock_bullet_param_id(bullet: &shikifsrs_elden_ring::bullets::BulletObservation) -> i32 {
+    let fly = bullet.fly.parameter_id;
     if fly >= 0 {
         return fly;
     }
-    let wait = bullet.wait_state.base.param.param_id;
+    let wait = bullet.wait.parameter_id;
     if wait >= 0 {
         return wait;
     }
-    bullet.exp_state.base.param.param_id
+    bullet.explosion.parameter_id
 }
 
-fn multi_lock_snapshot_targets() -> (bool, [MultiLockTargetSnapshot; MULTI_LOCK_BULLET_MAX_TARGETS])
-{
+fn multi_lock_snapshot_targets() -> (
+    bool,
+    [MultiLockTargetSnapshot; MULTI_LOCK_BULLET_MAX_TARGETS],
+) {
     let mut snapshot = [MultiLockTargetSnapshot::default(); MULTI_LOCK_BULLET_MAX_TARGETS];
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
+    let Ok(world_chr_man) = HudWorld::observe() else {
         return (false, snapshot);
     };
-    let Some(player) = world_chr_man.main_player.as_ref() else {
+    let Some(player) = world_chr_man.player else {
         refresh_multi_lock_target_markers(&[], None);
         return (false, snapshot);
     };
-    let Some(config) = multi_lock_config(&player.chr_ins) else {
+    let Some(config) = multi_lock_config(&player.actor) else {
         refresh_multi_lock_target_markers(&[], None);
         return (false, snapshot);
     };
 
-    if let Some(targets) = multi_lock_targets_for_player(
-        world_chr_man,
-        player.as_ref(),
-        player.locked_on_enemy,
-    ) {
+    if let Some(targets) =
+        multi_lock_targets_for_player(&world_chr_man, &player, player.locked_target)
+    {
         refresh_multi_lock_target_markers(&targets, Some(config.marker_sp_effect));
         for (index, (slot, handle)) in snapshot.iter_mut().zip(targets.iter()).enumerate() {
-            let Some(pos) = world_chr_man
-                .chr_ins_by_handle(handle)
-                .and_then(scholar_target_screen_pos)
+            let Some(pos) = hud_actor_by_handle(&world_chr_man, handle)
+                .and_then(|actor| scholar_target_screen_pos(&actor))
             else {
                 continue;
             };
@@ -1248,25 +1113,30 @@ fn multi_lock_snapshot_targets() -> (bool, [MultiLockTargetSnapshot; MULTI_LOCK_
     (true, snapshot)
 }
 
-fn refresh_multi_lock_target_markers(targets: &[FieldInsHandle], marker_sp_effect: Option<i32>) {
+fn refresh_multi_lock_target_markers(targets: &[HudHandle], marker_sp_effect: Option<i32>) {
     let Ok(mut marker_state) = MULTI_LOCK_TARGET_MARKERS.lock() else {
         return;
     };
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
+    let Ok(mut copied_world) = HudWorld::observe() else {
         return;
     };
+    let world_chr_man = &mut copied_world;
 
-    let current_targets: HashSet<FieldInsHandle> = targets.iter().copied().collect();
-    let previous: Vec<(FieldInsHandle, i32)> = marker_state
+    let current_targets: HashSet<HudHandle> = targets.iter().copied().collect();
+    let previous: Vec<(HudHandle, i32)> = marker_state
         .iter()
         .map(|(handle, marker)| (*handle, *marker))
         .collect();
 
     for (handle, old_marker) in previous {
-        let should_remove = marker_sp_effect != Some(old_marker) || !current_targets.contains(&handle);
+        let should_remove =
+            marker_sp_effect != Some(old_marker) || !current_targets.contains(&handle);
         if should_remove {
-            if let Some(chr) = world_chr_man.chr_ins_by_handle_mut(&handle) {
-                chr.remove_speffect(old_marker);
+            if let Some(chr) = hud_actor_by_handle(world_chr_man, &handle) {
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe { native_character::remove_effect(chr.identity.address, old_marker) },
+                );
             }
             marker_state.remove(&handle);
         }
@@ -1276,55 +1146,87 @@ fn refresh_multi_lock_target_markers(targets: &[FieldInsHandle], marker_sp_effec
         return;
     };
     for handle in targets {
-        if let Some(chr) = world_chr_man.chr_ins_by_handle_mut(handle) {
-            chr.apply_speffect(marker_sp_effect, true);
+        if let Some(chr) = hud_actor_by_handle(world_chr_man, handle) {
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(chr.identity.address, marker_sp_effect, true)
+                },
+            );
             marker_state.insert(*handle, marker_sp_effect);
         }
     }
 }
 
 fn bullet_owner_belongs_to_player(
-    owner: FieldInsHandle,
-    player_handle: FieldInsHandle,
-    bullet_manager: *mut CSBulletManager,
+    owner: HudHandle,
+    player_handle: HudHandle,
+    bullet_manager: u64,
 ) -> bool {
     if owner == player_handle {
         return true;
     }
-    if owner.selector.field_ins_type() != Some(FieldInsType::Bullet) || bullet_manager.is_null() {
+    if !owner.is_bullet() || bullet_manager == 0 {
         return false;
     }
-    unsafe { (&mut *bullet_manager).bullet_ins_by_handle(&owner) }
-        .is_some_and(|bullet| bullet.targeting_owner.owner_chr_handle == player_handle)
+    match native_bullets::observe() {
+        Ok(list) if list.manager_address == bullet_manager => list.members.iter().any(|bullet| {
+            bullet.identity.native_identifier == owner.raw()
+                && bullet.targeting_owner_identifier == player_handle.raw()
+        }),
+        Ok(_) => false,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD bullet owner rejected: {error}");
+            false
+        }
+    }
 }
 
 fn multi_lock_targets_for_player(
-    world_chr_man: &WorldChrMan,
-    player: &PlayerIns,
-    original_target: FieldInsHandle,
-) -> Option<Vec<FieldInsHandle>> {
-    let config = multi_lock_config(&player.chr_ins)?;
+    world_chr_man: &HudWorld,
+    player: &HudPlayer,
+    original_target: HudHandle,
+) -> Option<Vec<HudHandle>> {
+    let config = multi_lock_config(&player.actor)?;
     let target_limit = config.target_limit;
 
     let mut targets = Vec::with_capacity(target_limit);
     push_multi_lock_target(&mut targets, original_target, target_limit, world_chr_man);
     push_multi_lock_target(
         &mut targets,
-        player.locked_on_enemy,
+        player.locked_target,
         target_limit,
         world_chr_man,
     );
 
-    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
-    let mut scanned = 0usize;
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
-        if targets.len() >= target_limit || scanned >= MULTI_LOCK_BULLET_SCAN_MAX_ENTRIES {
+    let player_pos = hud_physics_position(&player.actor);
+    let entries = match native_world::update_entries(world_chr_man.object.address) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+            return None;
+        }
+    };
+    for entry in entries.into_iter().take(MULTI_LOCK_BULLET_SCAN_MAX_ENTRIES) {
+        if targets.len() >= target_limit {
             break;
         }
-        scanned += 1;
 
-        let chr = unsafe { entry.chr_ins.as_ref() };
-        if targets.contains(&chr.field_ins_handle) || scholar_reject_reason(chr).is_some() {
+        if let Err(error) = native_world::revalidate(entry.character) {
+            eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+            return None;
+        }
+        // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+        // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+        let copied = match HudActor::observe(entry.character) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                return None;
+            }
+        };
+        let chr = &copied;
+        if targets.contains(&chr.handle) || scholar_reject_reason(chr).is_some() {
             continue;
         }
         let Some(screen_pos) = scholar_target_screen_pos(chr) else {
@@ -1341,21 +1243,24 @@ fn multi_lock_targets_for_player(
         if !scholar_has_line_of_sight(chr, player) {
             continue;
         }
-        targets.push(chr.field_ins_handle);
+        targets.push(chr.handle);
     }
 
     Some(targets)
 }
 
-fn multi_lock_target_limit(player: &ChrIns) -> Option<usize> {
+fn multi_lock_target_limit(player: &HudActor) -> Option<usize> {
     multi_lock_config(player).map(|config| config.target_limit)
 }
 
-fn multi_lock_config(player: &ChrIns) -> Option<MultiLockConfig> {
-    player
-        .special_effect
-        .entries()
-        .filter_map(|entry| multi_lock_config_from_sp_effect(entry.param_id))
+fn multi_lock_config(player: &HudActor) -> Option<MultiLockConfig> {
+    native_character::effects(player.identity.address)
+        .map_err(|error| {
+            eprintln!("ShikiFSRS HUD multi-lock effects rejected: {error}");
+        })
+        .ok()?
+        .into_iter()
+        .filter_map(multi_lock_config_from_sp_effect)
         .max_by_key(|config| (config.target_limit, config.marker_sp_effect))
 }
 
@@ -1376,7 +1281,7 @@ fn multi_lock_config_from_sp_effect(sp_effect: i32) -> Option<MultiLockConfig> {
 }
 
 fn multi_lock_screen_pos_in_lens(pos: [f32; 2]) -> bool {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+    let Ok(window) = native_camera::HudWindow::observe() else {
         return true;
     };
     let width = window.screen_width as f32;
@@ -1385,25 +1290,26 @@ fn multi_lock_screen_pos_in_lens(pos: [f32; 2]) -> bool {
         return true;
     }
     let center = [width * SCHOLAR_LENS_CENTER_X_FACTOR, height * 0.5];
-    let radius = height.min(width) * SCHOLAR_LENS_RADIUS_FACTOR * MULTI_LOCK_SCREEN_LENS_RADIUS_SCALE;
+    let radius =
+        height.min(width) * SCHOLAR_LENS_RADIUS_FACTOR * MULTI_LOCK_SCREEN_LENS_RADIUS_SCALE;
     let dx = pos[0] - center[0];
     let dy = pos[1] - center[1];
     dx * dx + dy * dy <= radius * radius
 }
 
 fn push_multi_lock_target(
-    targets: &mut Vec<FieldInsHandle>,
-    target: FieldInsHandle,
+    targets: &mut Vec<HudHandle>,
+    target: HudHandle,
     target_limit: usize,
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
 ) {
     if targets.len() >= target_limit || target.is_empty() || targets.contains(&target) {
         return;
     }
-    let Some(chr) = world_chr_man.chr_ins_by_handle(&target) else {
+    let Some(chr) = hud_actor_by_handle(world_chr_man, &target) else {
         return;
     };
-    if scholar_reject_reason(chr).is_none() {
+    if scholar_reject_reason(&chr).is_none() {
         targets.push(target);
     }
 }
@@ -1430,8 +1336,7 @@ fn apply_camera_directed_position_hook(regs: *mut ilhook::x64::Registers) {
         || !next_x.is_finite()
         || !next_z.is_finite()
         || !horizontal_len.is_finite()
-        || horizontal_len < CAMERA_DIRECTED_MIN_FRAME_DELTA
-        || horizontal_len > CAMERA_DIRECTED_MAX_FRAME_DELTA
+        || !(CAMERA_DIRECTED_MIN_FRAME_DELTA..=CAMERA_DIRECTED_MAX_FRAME_DELTA).contains(&horizontal_len)
     {
         decay_camera_directed_vertical_bias();
         return;
@@ -1472,9 +1377,7 @@ fn camera_directed_mixed_horizontal_position(
         return None;
     }
 
-    let Some((camera_x, camera_z)) = camera_horizontal_direction() else {
-        return None;
-    };
+    let (camera_x, camera_z) = camera_horizontal_direction()?;
     let mix = pitch_strength * CAMERA_DIRECTED_HORIZONTAL_MIX_MAX;
     let mixed_dx = native_dx * (1.0 - mix) + camera_x * horizontal_len * mix;
     let mixed_dz = native_dz * (1.0 - mix) + camera_z * horizontal_len * mix;
@@ -1501,8 +1404,10 @@ fn update_camera_directed_vertical_bias(camera_pitch: f32, _horizontal_len: f32)
             -CAMERA_DIRECTED_MAX_VERTICAL_DELTA,
             CAMERA_DIRECTED_MAX_VERTICAL_DELTA,
         );
-        *bias = (*bias + delta * CAMERA_DIRECTED_VERTICAL_BIAS_RESPONSE)
-            .clamp(CAMERA_DIRECTED_VERTICAL_BIAS_MIN, CAMERA_DIRECTED_VERTICAL_BIAS_MAX);
+        *bias = (*bias + delta * CAMERA_DIRECTED_VERTICAL_BIAS_RESPONSE).clamp(
+            CAMERA_DIRECTED_VERTICAL_BIAS_MIN,
+            CAMERA_DIRECTED_VERTICAL_BIAS_MAX,
+        );
     }
     if bias.abs() < 0.001 {
         *bias = 0.0;
@@ -1533,7 +1438,7 @@ fn reset_camera_directed_vertical_bias() {
 }
 
 fn camera_horizontal_direction() -> Option<(f32, f32)> {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+    let Ok(camera) = native_camera::HudCamera::observe() else {
         return None;
     };
     let forward = camera.pers_cam_1.forward();
@@ -1545,14 +1450,19 @@ fn camera_horizontal_direction() -> Option<(f32, f32)> {
 }
 
 fn active_camera_directed_player_physics() -> Option<usize> {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
+    let Ok(world_chr_man) = HudWorld::observe() else {
         return None;
     };
-    let player = world_chr_man.main_player.as_ref()?;
-    if !chr_has_speffect(&player.chr_ins, CAMERA_DIRECTED_MOVEMENT_EFFECT) {
+    let player = world_chr_man.player?;
+    if !chr_has_speffect(&player.actor, CAMERA_DIRECTED_MOVEMENT_EFFECT) {
         return None;
     }
-    Some(player.chr_ins.modules.as_ref().physics.as_ref() as *const _ as usize)
+    native_character::module_address(
+        player.actor.identity.address,
+        shikifsrs_elden_ring::character_modules::CharacterModule::Physics,
+    )
+    .ok()
+    .map(|address| address as usize)
 }
 
 unsafe fn read_f32(address: usize) -> f32 {
@@ -1561,14 +1471,6 @@ unsafe fn read_f32(address: usize) -> f32 {
 
 unsafe fn read_i32(address: usize) -> i32 {
     unsafe { std::ptr::read_unaligned(address as *const i32) }
-}
-
-unsafe fn read_field_ins_handle(address: usize) -> FieldInsHandle {
-    unsafe { std::ptr::read_unaligned(address as *const FieldInsHandle) }
-}
-
-unsafe fn write_field_ins_handle(address: usize, handle: FieldInsHandle) {
-    unsafe { std::ptr::write_unaligned(address as *mut FieldInsHandle, handle) }
 }
 
 fn xmm_f32(xmm: u128, lane: usize) -> f32 {
@@ -1611,10 +1513,7 @@ fn record_duchess_replay_event(target_damage_module: usize, payload: DuchessRepl
     }
 }
 
-fn duchess_replay_payload_for(
-    target_damage_module: usize,
-    now: Instant,
-) -> DuchessReplayPayload {
+fn duchess_replay_payload_for(target_damage_module: usize, now: Instant) -> DuchessReplayPayload {
     if target_damage_module == 0 {
         return DuchessReplayPayload::default();
     }
@@ -1667,15 +1566,15 @@ fn consume_duchess_replay_ignore(
     remaining.hp_damage -= consumed_hp;
     ignored.hp_damage -= consumed_hp;
 
-    for (remaining_status, ignored_status) in remaining.status.iter_mut().zip(ignored.status.iter_mut()) {
+    for (remaining_status, ignored_status) in
+        remaining.status.iter_mut().zip(ignored.status.iter_mut())
+    {
         let consumed = (*remaining_status).min(*ignored_status);
         *remaining_status -= consumed;
         *ignored_status -= consumed;
     }
 
-    let consumed_super_armor = remaining
-        .super_armor_damage
-        .min(ignored.super_armor_damage);
+    let consumed_super_armor = remaining.super_armor_damage.min(ignored.super_armor_damage);
     remaining.super_armor_damage -= consumed_super_armor;
     ignored.super_armor_damage -= consumed_super_armor;
 
@@ -1806,32 +1705,36 @@ fn clear_recluse_damage_element(target_damage_module: usize) {
     }
 }
 
-fn damage_module_from_chr_ins(chr_ins: &eldenring::cs::ChrIns) -> usize {
-    let chr_ins = chr_ins as *const _ as usize;
-    let module_bag = unsafe { *((chr_ins + CHR_MODULE_BAG_OFFSET) as *const usize) };
-    if module_bag == 0 {
-        0
-    } else {
-        unsafe { *((module_bag + MODULE_DAMAGE_OFFSET) as *const usize) }
-    }
+fn damage_module_from_chr_ins(chr_ins: &HudActor) -> usize {
+    native_character::module_address(
+        chr_ins.identity.address,
+        shikifsrs_elden_ring::character_modules::CharacterModule::Damage,
+    )
+    .map_or_else(
+        |error| {
+            eprintln!("ShikiFSRS HUD damage owner rejected: {error}");
+            0
+        },
+        |address| address as usize,
+    )
 }
 
 fn target_recluse_damage_module(
-    world_chr_man: &WorldChrMan,
-    locked_on_enemy: &FieldInsHandle,
+    world_chr_man: &HudWorld,
+    locked_on_enemy: &HudHandle,
 ) -> Option<usize> {
     if locked_on_enemy.is_empty() {
         return None;
     }
 
-    let target = world_chr_man.chr_ins_by_handle(locked_on_enemy)?;
-    let damage_module = damage_module_from_chr_ins(target);
+    let target = hud_actor_by_handle(world_chr_man, locked_on_enemy)?;
+    let damage_module = damage_module_from_chr_ins(&target);
     (damage_module != 0).then_some(damage_module)
 }
 
 fn locked_target_screen_pos(
-    world_chr_man: &WorldChrMan,
-    locked_on_enemy: &FieldInsHandle,
+    world_chr_man: &HudWorld,
+    locked_on_enemy: &HudHandle,
 ) -> Option<[f32; 2]> {
     if locked_on_enemy.is_empty() {
         return None;
@@ -1843,60 +1746,55 @@ fn locked_target_screen_pos(
 }
 
 fn locked_target_body_screen_pos(
-    world_chr_man: &WorldChrMan,
-    locked_on_enemy: &FieldInsHandle,
+    world_chr_man: &HudWorld,
+    locked_on_enemy: &HudHandle,
 ) -> Option<[f32; 2]> {
-    let target = world_chr_man.chr_ins_by_handle(locked_on_enemy)?;
-    let camera = unsafe { CSCamera::instance() }.ok()?;
-    let body_position = recluse_body_marker_position(target);
+    let target = hud_actor_by_handle(world_chr_man, locked_on_enemy)?;
+    let camera = native_camera::HudCamera::observe().ok()?;
+    let body_position = recluse_body_marker_position(&target)?;
     project_lock_on_position(body_position, camera.pers_cam_1.as_ref())
 }
 
-fn recluse_body_marker_position(target: &eldenring::cs::ChrIns) -> fromsoftware_shared::F32Vector4 {
-    let ctrl = target.chr_ctrl.as_ref();
-    let base = ctrl.model_matrix.3;
-    let tag_offset = ctrl.lock_on_chr_tag_dmypoly_offset;
-    let lift = recluse_body_marker_lift(target, base.1);
+fn recluse_body_marker_position(target: &HudActor) -> Option<native_camera::Vector4> {
+    let geometry = native_character::marker_geometry(target.identity).ok()?;
+    let base = geometry.model_base;
+    let offset = geometry.frontend_displacement;
+    let lift = recluse_body_marker_lift(target, base[1])?;
 
-    fromsoftware_shared::F32Vector4(
-        base.0 + tag_offset.0,
-        base.1 + lift,
-        base.2 + tag_offset.2,
+    Some(native_camera::Vector4(
+        base[0] + offset[0],
+        base[1] + lift,
+        base[2] + offset[2],
         1.0,
-    )
+    ))
 }
 
-fn recluse_body_marker_lift(target: &eldenring::cs::ChrIns, base_y: f32) -> f32 {
-    let ctrl = target.chr_ctrl.as_ref();
-    let physics = target.modules.as_ref().physics.as_ref();
-    let hit_lift = physics.hit_height * RECLUSE_MARKER_HIT_HEIGHT_FACTOR;
-    let aabb = target
-        .chr_model_ins
-        .as_ref()
-        .model_ins
-        .model_item
-        .location_aabb_exporter
-        .as_ref()
-        .aabb;
-    let aabb_lift =
-        (aabb.min.1 + (aabb.max.1 - aabb.min.1) * RECLUSE_MARKER_AABB_HEIGHT_FACTOR) - base_y;
+fn recluse_body_marker_lift(target: &HudActor, base_y: f32) -> Option<f32> {
+    let physics = native_character::physics_shape(target.identity.address).ok()?;
+    let hit_lift = physics.height * RECLUSE_MARKER_HIT_HEIGHT_FACTOR;
+    let [minimum, maximum] = native_character::model_bounds(target.identity.address).ok()??;
+    let min_y = f32::from_bits(minimum[1]);
+    let max_y = f32::from_bits(maximum[1]);
+    let aabb_lift = (min_y + (max_y - min_y) * RECLUSE_MARKER_AABB_HEIGHT_FACTOR) - base_y;
 
     match (
         valid_recluse_marker_lift(hit_lift),
         valid_recluse_marker_lift(aabb_lift),
     ) {
-        (true, true) => return hit_lift.max(aabb_lift),
-        (true, false) => return hit_lift,
-        (false, true) => return aabb_lift,
+        (true, true) => return Some(hit_lift.max(aabb_lift)),
+        (true, false) => return Some(hit_lift),
+        (false, true) => return Some(aabb_lift),
         (false, false) => {}
     }
 
-    let lock_lift = target.lock_on_target_position.1 - base_y;
-    if valid_recluse_marker_lift(lock_lift) {
-        return lock_lift;
+    // Raw cache is a consumer fallback only; no lock-point identity is inferred.
+    if let Ok(cache) = native_character::position_cache_d0(target.identity) {
+        let cache_lift = cache[1] - base_y;
+        if valid_recluse_marker_lift(cache_lift) { return Some(cache_lift); }
     }
 
-    RECLUSE_MARKER_FALLBACK_BODY_LIFT * ctrl.scale_size_y.abs().clamp(0.5, 4.0)
+    let scale_y = native_character::axis_scale(target.identity).ok()?[1];
+    Some(RECLUSE_MARKER_FALLBACK_BODY_LIFT * scale_y.abs().clamp(0.5, 4.0))
 }
 
 fn valid_recluse_marker_lift(lift: f32) -> bool {
@@ -1905,25 +1803,25 @@ fn valid_recluse_marker_lift(lift: f32) -> bool {
 }
 
 fn project_lock_on_position(
-    position: fromsoftware_shared::F32Vector4,
-    camera: &eldenring::cs::CSPersCam,
+    position: native_camera::Vector4,
+    camera: &native_camera::HudPerspective,
 ) -> Option<[f32; 2]> {
     project_lock_on_position_with_mode(position, camera, true)
 }
 
 fn project_lock_on_position_column(
-    position: fromsoftware_shared::F32Vector4,
-    camera: &eldenring::cs::CSPersCam,
+    position: native_camera::Vector4,
+    camera: &native_camera::HudPerspective,
 ) -> Option<[f32; 2]> {
     project_lock_on_position_with_mode(position, camera, false)
 }
 
 fn project_lock_on_position_with_mode(
-    position: fromsoftware_shared::F32Vector4,
-    camera: &eldenring::cs::CSPersCam,
+    position: native_camera::Vector4,
+    camera: &native_camera::HudPerspective,
     use_row_axes: bool,
 ) -> Option<[f32; 2]> {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+    let Ok(window) = native_camera::HudWindow::observe() else {
         return None;
     };
     let width = window.screen_width as f32;
@@ -1972,100 +1870,85 @@ fn project_lock_on_position_with_mode(
     project_with_camera_axes(rel, axes, width, height, aspect, tan_half_fov)
 }
 
-fn locked_target_tag_screen_pos(locked_on_enemy: &FieldInsHandle) -> Option<[f32; 2]> {
+fn locked_target_tag_screen_pos(locked_on_enemy: &HudHandle) -> Option<[f32; 2]> {
     locked_target_enemy_display_screen_pos(locked_on_enemy)
         .or_else(|| locked_target_frontend_tag_screen_pos(locked_on_enemy))
 }
 
-fn locked_target_enemy_display_screen_pos(locked_on_enemy: &FieldInsHandle) -> Option<[f32; 2]> {
-    let fe_man = unsafe { CSFeManImp::instance() }.ok()?;
-    if let Some(tag) = fe_man.enemy_chr_tag_displays.iter().find(|tag| {
-        tag.field_ins_handle == *locked_on_enemy
-            && tag.is_visible
-            && tag.last_update_time_delta <= 0.25
-    }) {
-        return valid_screen_pos([tag.screen_pos.0, tag.screen_pos.1]);
-    }
-
-    None
+fn locked_target_enemy_display_screen_pos(locked_on_enemy: &HudHandle) -> Option<[f32; 2]> {
+    native_hud::enemy_display_position(locked_on_enemy.raw())
+        .map_err(|error| eprintln!("ShikiFSRS HUD display marker copy rejected: {error}"))
+        .ok()
+        .flatten()
+        .and_then(valid_screen_pos)
 }
 
-fn locked_target_frontend_tag_screen_pos(locked_on_enemy: &FieldInsHandle) -> Option<[f32; 2]> {
-    let fe_man = unsafe { CSFeManImp::instance() }.ok()?;
-    fe_man
-        .frontend_values
-        .enemy_chr_tag_data
-        .iter()
-        .find(|tag| {
-            tag.field_ins_handle == *locked_on_enemy
-                && tag.is_visible
-                && tag.update_position
-                && !tag.is_not_on_screen
-        })
-        .and_then(|tag| valid_screen_pos([tag.screen_pos_x as f32, tag.screen_pos_y as f32]))
+fn locked_target_frontend_tag_screen_pos(locked_on_enemy: &HudHandle) -> Option<[f32; 2]> {
+    native_hud::frontend_tag_position(locked_on_enemy.raw())
+        .map_err(|error| eprintln!("ShikiFSRS HUD tag marker copy rejected: {error}"))
+        .ok()
+        .flatten()
+        .and_then(valid_screen_pos)
 }
 
 fn locked_target_debug_screen_points(
-    world_chr_man: &WorldChrMan,
-    locked_on_enemy: &FieldInsHandle,
+    world_chr_man: &HudWorld,
+    locked_on_enemy: &HudHandle,
 ) -> LockDebugPoints {
     if locked_on_enemy.is_empty() {
         return [None; 5];
     }
 
-    let Some(target) = world_chr_man.chr_ins_by_handle(locked_on_enemy) else {
+    let Some(target) = hud_actor_by_handle(world_chr_man, locked_on_enemy) else {
         return [None; 5];
     };
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+    let Ok(camera) = native_camera::HudCamera::observe() else {
         return [None; 5];
     };
     let camera = camera.pers_cam_1.as_ref();
-    let ctrl = target.chr_ctrl.as_ref();
-    let tag_position = fromsoftware_shared::F32Vector4(
-        ctrl.model_matrix.3.0 + ctrl.lock_on_chr_tag_dmypoly_offset.0,
-        ctrl.model_matrix.3.1 + ctrl.lock_on_chr_tag_dmypoly_offset.1,
-        ctrl.model_matrix.3.2 + ctrl.lock_on_chr_tag_dmypoly_offset.2,
-        1.0,
-    );
+    // Keep five diagnostics, with explicitly named independent sources. Missing one
+    // source does not erase the other actual frontend positions.
+    let cache = native_character::position_cache_d0(target.identity).ok().map(|[x,y,z,w]| native_camera::Vector4(x,y,z,w));
+    let anchor = native_character::marker_geometry(target.identity).ok().map(|copy| {
+        let [x,y,z] = copy.frontend_anchor;
+        native_camera::Vector4(x,y,z,1.0)
+    });
 
     [
-        project_lock_on_position(target.lock_on_target_position, camera),
-        project_lock_on_position_column(target.lock_on_target_position, camera),
-        project_lock_on_position(tag_position, camera),
+        cache.and_then(|point| project_lock_on_position(point, camera)),
+        cache.and_then(|point| project_lock_on_position_column(point, camera)),
+        anchor.and_then(|point| project_lock_on_position(point, camera)),
         locked_target_enemy_display_screen_pos(locked_on_enemy),
         locked_target_frontend_tag_screen_pos(locked_on_enemy),
     ]
 }
 
-fn scholar_target_screen_pos(target: &eldenring::cs::ChrIns) -> Option<[f32; 2]> {
-    let camera = unsafe { CSCamera::instance() }.ok()?;
-    let body_position = scholar_body_marker_position(target);
+fn scholar_target_screen_pos(target: &HudActor) -> Option<[f32; 2]> {
+    let camera = native_camera::HudCamera::observe().ok()?;
+    let body_position = scholar_body_marker_position(target)?;
     project_lock_on_position(body_position, camera.pers_cam_1.as_ref())
 }
 
-fn ironeye_weakness_marker_screen_pos(
-    player: &PlayerIns,
-    target: &ChrIns,
-) -> Option<[f32; 2]> {
-    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
-    project_character_marker_screen_pos(player_pos, scholar_body_marker_position(target))
+fn ironeye_weakness_marker_screen_pos(player: &HudPlayer, target: &HudActor) -> Option<[f32; 2]> {
+    let player_pos = hud_physics_position(&player.actor);
+    project_character_marker_screen_pos(player_pos, scholar_body_marker_position(target)?)
 }
 
 fn resurrection_accumulation_teammate_screen_pos(
-    player_position: HavokPosition,
-    teammate: &ChrIns,
+    player_position: HudPosition,
+    teammate: &HudActor,
 ) -> Option<[f32; 2]> {
     project_character_marker_screen_pos(
         player_position,
-        resurrection_accumulation_teammate_marker_position(teammate),
+        resurrection_accumulation_teammate_marker_position(teammate)?,
     )
 }
 
 fn project_character_marker_screen_pos(
-    player_position: HavokPosition,
-    target_position: fromsoftware_shared::F32Vector4,
+    player_position: HudPosition,
+    target_position: native_camera::Vector4,
 ) -> Option<[f32; 2]> {
-    let camera = unsafe { CSCamera::instance() }.ok()?;
+    let camera = native_camera::HudCamera::observe().ok()?;
     let camera = camera.pers_cam_1.as_ref();
     let camera_pos = camera.position();
     camera_depths_on_same_projection_side(
@@ -2078,24 +1961,24 @@ fn project_character_marker_screen_pos(
     project_lock_on_position(target_position, camera).filter(|pos| scholar_screen_pos_on_view(*pos))
 }
 
-fn scholar_body_marker_position(target: &ChrIns) -> fromsoftware_shared::F32Vector4 {
-    let ctrl = target.chr_ctrl.as_ref();
-    let tag_offset = ctrl.lock_on_chr_tag_dmypoly_offset;
-    let physics = target.modules.as_ref().physics.as_ref();
-    let base = physics.position;
-    let lift = (physics.hit_height * RECLUSE_MARKER_HIT_HEIGHT_FACTOR)
+fn scholar_body_marker_position(target: &HudActor) -> Option<native_camera::Vector4> {
+    let offset = native_character::marker_geometry(target.identity).ok()?.frontend_displacement;
+    let physics = native_character::physics_shape(target.identity.address).ok()?;
+    let [x, y, z, w] = physics.position_bits.map(f32::from_bits);
+    let base = HudPosition(x, y, z, w);
+    let lift = (physics.height * RECLUSE_MARKER_HIT_HEIGHT_FACTOR)
         .clamp(RECLUSE_MARKER_MIN_LOCK_LIFT, RECLUSE_MARKER_MAX_LOCK_LIFT);
 
-    fromsoftware_shared::F32Vector4(
-        base.0 + tag_offset.0,
+    Some(native_camera::Vector4(
+        base.0 + offset[0],
         base.1 + lift,
-        base.2 + tag_offset.2,
+        base.2 + offset[2],
         1.0,
-    )
+    ))
 }
 
 fn scholar_screen_pos_in_lens(pos: [f32; 2]) -> bool {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+    let Ok(window) = native_camera::HudWindow::observe() else {
         return false;
     };
     let width = window.screen_width as f32;
@@ -2108,21 +1991,8 @@ fn scholar_screen_pos_in_lens(pos: [f32; 2]) -> bool {
     screen_distance_sq(pos, center) <= radius * radius
 }
 
-fn scholar_screen_pos_lens_score(pos: [f32; 2]) -> Option<f32> {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
-        return None;
-    };
-    let width = window.screen_width as f32;
-    let height = window.screen_height as f32;
-    if width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    let center = [width * SCHOLAR_LENS_CENTER_X_FACTOR, height * 0.5];
-    Some(screen_distance_sq(pos, center))
-}
-
 fn scholar_screen_pos_on_view(pos: [f32; 2]) -> bool {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+    let Ok(window) = native_camera::HudWindow::observe() else {
         return false;
     };
     let width = window.screen_width as f32;
@@ -2153,8 +2023,8 @@ fn scholar_scan_gain(distance: f32) -> f32 {
 }
 
 fn scholar_in_lock_target_volume(
-    player: &PlayerIns,
-    target_pos: HavokPosition,
+    player: &HudPlayer,
+    target_pos: HudPosition,
     target_distance: f32,
 ) -> bool {
     let radius = scholar_lock_target_radius()
@@ -2164,13 +2034,13 @@ fn scholar_in_lock_target_volume(
         return false;
     }
 
-    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
+    let player_pos = hud_physics_position(&player.actor);
     let dy = target_pos.1 - player_pos.1;
     if dy.abs() > SCHOLAR_LOCK_TARGET_MAX_VERTICAL {
         return false;
     }
 
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+    let Ok(camera) = native_camera::HudCamera::observe() else {
         return true;
     };
     let camera = camera.pers_cam_1.as_ref();
@@ -2195,68 +2065,64 @@ fn scholar_in_lock_target_volume(
     let side_limit_by_radius = (radius * SCHOLAR_LOCK_TARGET_MAX_SIDE_FACTOR)
         .max(10.0)
         .min(radius);
-    let side_limit_by_depth =
-        (target_depth.abs() + SCHOLAR_LOCK_TARGET_FORWARD_PAD) * SCHOLAR_LOCK_TARGET_SIDE_DEPTH_FACTOR;
+    let side_limit_by_depth = (target_depth.abs() + SCHOLAR_LOCK_TARGET_FORWARD_PAD)
+        * SCHOLAR_LOCK_TARGET_SIDE_DEPTH_FACTOR;
     side <= side_limit_by_radius.min(side_limit_by_depth)
 }
 
 fn scholar_lock_target_radius() -> f32 {
-    let param_id = (unsafe { GameMan::instance() })
-        .ok()
-        .map(|game_man| {
-            if game_man.lock_on_camera_param_id > 0 {
-                game_man.lock_on_camera_param_id
-            } else if game_man.locked_camera_param_id > 0 {
-                game_man.locked_camera_param_id
+    use shikifsrs_elden_ring::parameter_fields::{ParameterField as F, ScalarValue as V};
+    let param_id = sdk_host::with_objects(|objects, epoch| {
+        Ok(objects.game_camera_state(epoch)?.map(|v| {
+            if v.parameter_ids[3] > 0 {
+                v.parameter_ids[3]
+            } else if v.parameter_ids[1] > 0 {
+                v.parameter_ids[1]
             } else {
-                game_man.normal_camera_param_id
+                v.parameter_ids[0]
             }
-        })
-        .unwrap_or(0);
+        }))
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(0);
     if param_id <= 0 {
         return SCHOLAR_LOCK_TARGET_FALLBACK_RADIUS;
     }
-
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance() }) else {
-        return SCHOLAR_LOCK_TARGET_FALLBACK_RADIUS;
-    };
-    let Some(lock_cam) = param_repository.get::<LockCamParam>(param_id as u32) else {
-        return SCHOLAR_LOCK_TARGET_FALLBACK_RADIUS;
-    };
-
     [
-        lock_cam.chr_lock_range_max_radius(),
-        lock_cam.chr_lock_range_max_radius_for_d(),
-        lock_cam.chr_lock_range_max_radius_for_pd(),
+        F::CameraLockRadius,
+        F::CameraLockRadiusDistance,
+        F::CameraLockRadiusPlayerDistance,
     ]
     .into_iter()
-    .filter(|value| value.is_finite() && *value > 0.0)
+    .filter_map(
+        |field| match native_parameters::read_field(field, param_id as u32) {
+            Ok(Some(V::F32(value))) if value.is_finite() && value > 0. => Some(value),
+            _ => None,
+        },
+    )
     .fold(SCHOLAR_LOCK_TARGET_FALLBACK_RADIUS, f32::max)
 }
 
-fn distance3(a: fromsoftware_shared::F32Vector4, b: fromsoftware_shared::F32Vector4) -> f32 {
+fn distance3(a: native_camera::Vector4, b: native_camera::Vector4) -> f32 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
     let dz = a.2 - b.2;
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn distance_havok(a: HavokPosition, b: HavokPosition) -> f32 {
+fn distance_havok(a: HudPosition, b: HudPosition) -> f32 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
     let dz = a.2 - b.2;
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
-fn havok_position_is_finite(position: &HavokPosition) -> bool {
+fn havok_position_is_finite(position: &HudPosition) -> bool {
     position.0.is_finite() && position.1.is_finite() && position.2.is_finite()
 }
 
-fn dot_from_target(
-    previous: HavokPosition,
-    current: HavokPosition,
-    target: HavokPosition,
-) -> f32 {
+fn dot_from_target(previous: HudPosition, current: HudPosition, target: HudPosition) -> f32 {
     let previous_to_target = target - previous;
     let current_to_target = target - current;
     previous_to_target.0 * current_to_target.0
@@ -2264,46 +2130,62 @@ fn dot_from_target(
         + previous_to_target.2 * current_to_target.2
 }
 
-fn scholar_chr_physics_position(target: &ChrIns) -> HavokPosition {
-    target.modules.as_ref().physics.as_ref().position
+fn scholar_chr_physics_position(target: &HudActor) -> HudPosition {
+    hud_physics_position(target)
 }
 
-fn scholar_target_havok_position(target: &ChrIns, height_factor: f32) -> HavokPosition {
-    let physics = target.modules.as_ref().physics.as_ref();
-    let lift = (physics.hit_height * height_factor)
+fn scholar_target_havok_position(target: &HudActor, height_factor: f32) -> Option<HudPosition> {
+    let physics = native_character::physics_shape(target.identity.address).ok()?;
+    let [x, y, z, _] = physics.position_bits.map(f32::from_bits);
+    let lift = (physics.height * height_factor)
         .clamp(RECLUSE_MARKER_MIN_LOCK_LIFT, RECLUSE_MARKER_MAX_LOCK_LIFT);
-    HavokPosition(
-        physics.position.0,
-        physics.position.1 + lift,
-        physics.position.2,
-        0.0,
+    Some(HudPosition(x, y + lift, z, 0.0))
+}
+
+fn hud_cast_ray(
+    player: &HudPlayer,
+    filter: u32,
+    origin: HudPosition,
+    delta: HudDelta,
+) -> shikifsrs_runtime::Result<Option<HudPosition>> {
+    let target = native_vitals::identity(player.actor.identity.address)?;
+    sdk_host::cast_line(
+        target,
+        filter,
+        [origin.0, origin.1, origin.2],
+        [delta.0, delta.1, delta.2],
     )
+    .map(|hit| hit.map(|[x, y, z]| HudPosition(x, y, z, 0.0)))
 }
 
 fn scholar_line_of_sight_to_point(
-    havok: &eldenring::cs::CSHavokMan,
-    origin: HavokPosition,
-    target_pos: HavokPosition,
-    target: &ChrIns,
-    player: &PlayerIns,
+    origin: HudPosition,
+    target_pos: HudPosition,
+    target: &HudActor,
+    player: &HudPlayer,
 ) -> bool {
     let target_distance = distance_havok(origin, target_pos);
-    let delta = PositionDelta(
+    let delta = HudDelta(
         target_pos.0 - origin.0,
         target_pos.1 - origin.1,
         target_pos.2 - origin.2,
     );
-    let physics = target.modules.as_ref().physics.as_ref();
-    let tolerance = (physics.hit_radius * SCHOLAR_LINE_OF_SIGHT_RADIUS_TOLERANCE
-        + physics.hit_height * SCHOLAR_LINE_OF_SIGHT_HEIGHT_TOLERANCE)
+    let Ok(physics) = native_character::physics_shape(target.identity.address) else {
+        return false;
+    };
+    let tolerance = (physics.radius * SCHOLAR_LINE_OF_SIGHT_RADIUS_TOLERANCE
+        + physics.height * SCHOLAR_LINE_OF_SIGHT_HEIGHT_TOLERANCE)
         .max(SCHOLAR_LINE_OF_SIGHT_MIN_TOLERANCE);
     for filter in SCHOLAR_LINE_OF_SIGHT_FILTERS {
-        let Some(hit) = havok
-            .phys_world
-            .as_ref()
-            .cast_ray(filter, &origin, delta, player)
-        else {
-            continue;
+        let hit = match hud_cast_ray(player, filter, origin, delta) {
+            Ok(Some(hit)) => hit,
+            Ok(None) => continue,
+            Err(error) => {
+                eprintln!(
+                    "ShikiFSRS HUD line query failed or uncertain; receipt retained: {error}"
+                );
+                return false;
+            }
         };
 
         let hit_distance = distance_havok(origin, hit);
@@ -2318,287 +2200,127 @@ fn scholar_line_of_sight_to_point(
     true
 }
 
-fn scholar_has_line_of_sight(target: &ChrIns, player: &PlayerIns) -> bool {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+fn scholar_has_line_of_sight(target: &HudActor, player: &HudPlayer) -> bool {
+    let Ok(camera) = native_camera::HudCamera::observe() else {
         return true;
     };
-    let Ok(havok) = (unsafe { CSHavokMan::instance() }) else {
-        return true;
-    };
-
-    let origin = camera.pers_cam_1.as_ref().position();
+    let camera_origin = camera.pers_cam_1.as_ref().position();
+    let origin = HudPosition(
+        camera_origin.0,
+        camera_origin.1,
+        camera_origin.2,
+        camera_origin.3,
+    );
     [0.38, 0.58, 0.78].into_iter().any(|height_factor| {
-        scholar_line_of_sight_to_point(
-            havok,
-            origin,
-            scholar_target_havok_position(target, height_factor),
-            target,
-            player,
-        )
+        let Some(target_pos) = scholar_target_havok_position(target, height_factor) else {
+            return false;
+        };
+        scholar_line_of_sight_to_point(origin, target_pos, target, player)
     })
 }
 
-fn scholar_candidate_debug(
-    chr: &eldenring::cs::ChrIns,
-    distance: f32,
-    player: &PlayerIns,
-) -> ScholarCandidateDebug {
-    let data = chr.modules.as_ref().data.as_ref();
-    let ctrl = chr.chr_ctrl.as_ref();
-    let physics = chr.modules.as_ref().physics.as_ref();
-    let chr_set_entry = unsafe { chr.chr_set_entry.as_ref() };
-    let load_status = chr_set_entry.chr_load_status as u8;
-    let (los_target_distance, los_hit_mask, los_near_mask, los_block_mask, los_closest_hit_distance, los_block_filter) =
-        scholar_los_filter_debug(chr, player);
-    ScholarCandidateDebug {
-        active: true,
-        selector_index: chr.field_ins_handle.selector.index(),
-        selector_container: chr.field_ins_handle.selector.container(),
-        block_area: chr.field_ins_handle.block_id.area(),
-        block_block: chr.field_ins_handle.block_id.block(),
-        block_region: chr.field_ins_handle.block_id.region(),
-        block_index: chr.field_ins_handle.block_id.index(),
-        npc_id: chr.npc_id,
-        chr_type: chr.chr_type as i32,
-        hp: data.hp,
-        max_hp: data.max_hp,
-        distance,
-        load_status,
-        chr_update_type: chr_set_entry.chr_update_type as u8,
-        draw_group: chr.load_state.draw_group_enabled(),
-        backread_disabled: chr.load_state.backread_disabled(),
-        host_inactive: chr.load_state.host_inactive(),
-        extinction_death: chr.load_state.extinction_death(),
-        near_pc: chr.load_state.near_pc(),
-        render_group: chr.chr_flags1c4.is_render_group_enabled(),
-        onscreen_flag: chr.chr_flags1c4.is_onscreen(),
-        enable_render: chr.chr_flags1c5.enable_render(),
-        death_flag: chr.chr_flags1c5.death_flag(),
-        is_active: chr.chr_flags1c8.is_active(),
-        update_tasks_registered: chr.chr_flags1c8.update_tasks_registered(),
-        force_unloaded: runtime_chr_force_unloaded(chr),
-        character_disabled: runtime_chr_character_disabled(chr),
-        tint_alpha: chr.tint_alpha_multiplier,
-        tint_alpha_modifier: chr.tint_alpha_multiplier_modifier,
-        base_transparency: chr.base_transparency,
-        base_transparency_modifier: chr.base_transparency_modifier,
-        event_entity_id: chr.event_entity_id,
-        chr_set_entry_flags: chr_set_entry.entry_flags,
-        activation_enabled: chr.chr_activation_flags.activation_enabled(),
-        activate_threshold_exceeded: chr.chr_flags1ca.activate_threshold_exceeded(),
-        sounds_active: chr.chr_flags1ca.sounds_active(),
-        opacity_keyframes: chr.opacity_keyframes_multiplier,
-        opacity_keyframes_previous: chr.opacity_keyframes_multiplier_previous,
-        camouflage_transparency: chr.camouflage_transparency,
-        distance_to_player_sqr: runtime_chr_distance_to_player_sqr(chr),
-        horizontal_distance_to_player_sqr: runtime_chr_horizontal_distance_to_player_sqr(chr),
-        max_render_range: runtime_chr_max_render_range(chr),
-        chr_activate_threshold: runtime_chr_activate_threshold(chr),
-        current_anim_id: scholar_current_anim_id(chr),
-        request_anim_id: chr.modules.as_ref().event.as_ref().request_animation_id,
-        idle_anim_id: chr.modules.as_ref().event.as_ref().idle_anim_id,
-        current_tae_id: chr
-            .modules
-            .as_ref()
-            .action_request
-            .as_ref()
-            .action_request_queue
-            .current_tae_id,
-        chr_collision: ctrl.chr_collision,
-        ctrl_disable_move: ctrl.disable_move,
-        ctrl_disable_player_collision: ctrl.flags.disable_player_collision(),
-        ctrl_disable_hit: ctrl.flags.disable_hit(),
-        ctrl_disable_map_collision: ctrl.flags.disable_map_collision(),
-        ctrl_disable_capsule_collision: ctrl.flags.disable_character_capsule_collision(),
-        ctrl_disable_object_collision: ctrl.flags.disable_object_collision(),
-        ctrl_proxy_pos_sync: ctrl.chr_proxy_flags.position_sync_requested(),
-        ctrl_proxy_rot_sync: ctrl.chr_proxy_flags.rotation_sync_requested(),
-        physics_chr_proxy: read_usize_field(physics, CHR_PHYSICS_PROXY_OFFSET),
-        physics_chr_proxy2: read_usize_field(physics, CHR_PHYSICS_PROXY2_OFFSET),
-        physics_collision_shape: read_usize_field(physics, CHR_PHYSICS_COLLISION_SHAPE_OFFSET),
-        physics_pos_update_requested: physics.chr_proxy_pos_update_requested,
-        physics_standing_on_ground: physics.standing_on_solid_ground,
-        physics_touching_ground: physics.touching_solid_ground,
-        physics_slide_enabled: physics.slide_info.enabled,
-        physics_gravity_disabled: physics.gravity_disabled,
-        chr_ptr: chr as *const eldenring::cs::ChrIns as usize,
-        data_ptr: data as *const _ as usize,
-        chr_set_entry_ptr: chr.chr_set_entry.as_ptr() as usize,
-        msb_draw_flags: data.msb_parts.cs_msb_parts.draw_flags,
-        msb_part_ptr: data.msb_parts.cs_msb_parts.msb_part.as_ptr() as usize,
-        chr_hash: hash_bytes(chr, CHR_INS_DEBUG_HASH_LEN),
-        data_hash: hash_bytes(data, CHR_DATA_DEBUG_HASH_LEN),
-        msb_hash: hash_bytes(&data.msb_parts, CHR_MSB_PARTS_DEBUG_HASH_LEN),
-        entry_hash: hash_bytes(chr_set_entry, CHR_SET_ENTRY_DEBUG_HASH_LEN),
-        entry_raw0: read_u64_field(chr_set_entry, 0),
-        entry_raw1: read_u64_field(chr_set_entry, 8),
-        los_target_distance,
-        los_hit_mask,
-        los_near_mask,
-        los_block_mask,
-        los_closest_hit_distance,
-        los_block_filter,
-    }
-}
-
-fn read_usize_field<T>(base: &T, offset: usize) -> usize {
-    unsafe { *((base as *const T as usize + offset) as *const usize) }
-}
-
-fn read_u64_field<T>(base: &T, offset: usize) -> u64 {
-    unsafe { *((base as *const T as usize + offset) as *const u64) }
-}
-
-fn hash_bytes<T>(base: &T, len: usize) -> u32 {
-    let bytes = unsafe { std::slice::from_raw_parts(base as *const T as *const u8, len) };
-    let mut hash = 0x811C9DC5u32;
-    for &byte in bytes {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
-}
-
-fn scholar_los_filter_debug(target: &ChrIns, player: &PlayerIns) -> (f32, u32, u32, u32, f32, i32) {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
-        return (0.0, 0, 0, 0, -1.0, -1);
-    };
-    let Ok(havok) = (unsafe { CSHavokMan::instance() }) else {
-        return (0.0, 0, 0, 0, -1.0, -1);
-    };
-
-    let origin = camera.pers_cam_1.as_ref().position();
-    let target_pos = scholar_target_havok_position(target, 0.58);
-    let target_distance = distance_havok(origin, target_pos);
-    let delta = PositionDelta(
-        target_pos.0 - origin.0,
-        target_pos.1 - origin.1,
-        target_pos.2 - origin.2,
-    );
-    let physics = target.modules.as_ref().physics.as_ref();
-    let tolerance = (physics.hit_radius * SCHOLAR_LINE_OF_SIGHT_RADIUS_TOLERANCE
-        + physics.hit_height * SCHOLAR_LINE_OF_SIGHT_HEIGHT_TOLERANCE)
-        .max(SCHOLAR_LINE_OF_SIGHT_MIN_TOLERANCE);
-
-    let mut hit_mask = 0;
-    let mut near_mask = 0;
-    let mut block_mask = 0;
-    let mut closest_hit_distance = f32::MAX;
-    let mut block_filter = -1;
-    for (index, filter) in SCHOLAR_LINE_OF_SIGHT_FILTERS.into_iter().enumerate() {
-        let Some(hit) = havok
-            .phys_world
-            .as_ref()
-            .cast_ray(filter, &origin, delta, player)
-        else {
-            continue;
-        };
-        let bit = 1u32 << index;
-        hit_mask |= bit;
-
-        let hit_distance = distance_havok(origin, hit);
-        if hit_distance < closest_hit_distance {
-            closest_hit_distance = hit_distance;
-        }
-        if hit_distance <= SCHOLAR_LINE_OF_SIGHT_NEAR_HIT_IGNORE {
-            near_mask |= bit;
-            continue;
-        }
-        if hit_distance + tolerance < target_distance {
-            block_mask |= bit;
-            if block_filter < 0 {
-                block_filter = filter as i32;
-            }
-        }
-    }
-
-    if closest_hit_distance == f32::MAX {
-        closest_hit_distance = -1.0;
-    }
-
-    (
-        target_distance,
-        hit_mask,
-        near_mask,
-        block_mask,
-        closest_hit_distance,
-        block_filter,
-    )
-}
-
 fn resurrection_accumulation_teammate_marker_position(
-    teammate: &ChrIns,
-) -> fromsoftware_shared::F32Vector4 {
-    let ctrl = teammate.chr_ctrl.as_ref();
-    let tag_offset = ctrl.lock_on_chr_tag_dmypoly_offset;
-    let physics = teammate.modules.as_ref().physics.as_ref();
-    let base = physics.position;
-    let scale = ctrl.scale_size_y.abs().clamp(0.5, 4.0);
-    let hit_height = if physics.hit_height.is_finite() && physics.hit_height > 0.1 {
-        physics.hit_height
+    teammate: &HudActor,
+) -> Option<native_camera::Vector4> {
+    let offset = native_character::marker_geometry(teammate.identity).ok()?.frontend_displacement;
+    let physics = native_character::physics_shape(teammate.identity.address).ok()?;
+    let [x, y, z, w] = physics.position_bits.map(f32::from_bits);
+    let base = HudPosition(x, y, z, w);
+    let scale = native_character::axis_scale(teammate.identity).ok()?[1].abs().clamp(0.5, 4.0);
+    let hit_height = if physics.height.is_finite() && physics.height > 0.1 {
+        physics.height
     } else {
         RESURRECTION_TEAMMATE_FALLBACK_HEAD_LIFT * scale
     };
-    let lift = (hit_height + RESURRECTION_TEAMMATE_HEAD_PADDING * scale)
-        .clamp(RECLUSE_MARKER_MIN_LOCK_LIFT, RESURRECTION_TEAMMATE_MAX_HEAD_LIFT);
+    let lift = (hit_height + RESURRECTION_TEAMMATE_HEAD_PADDING * scale).clamp(
+        RECLUSE_MARKER_MIN_LOCK_LIFT,
+        RESURRECTION_TEAMMATE_MAX_HEAD_LIFT,
+    );
 
-    fromsoftware_shared::F32Vector4(
-        base.0 + tag_offset.0,
+    Some(native_camera::Vector4(
+        base.0 + offset[0],
         base.1 + lift,
-        base.2 + tag_offset.2,
+        base.2 + offset[2],
         1.0,
-    )
+    ))
 }
 
-fn scholar_is_event_hidden(chr: &eldenring::cs::ChrIns) -> bool {
-    let chr_set_entry = unsafe { chr.chr_set_entry.as_ref() };
-    chr.chr_flags1c5.death_flag()
-        || (chr_set_entry.entry_flags & 0x01) != 0
+fn scholar_is_event_hidden(chr: &HudActor) -> bool {
+    let Ok(flags) = native_character::flags(chr.identity.address) else {
+        // An unknown native presentation source cannot admit this target.
+        return true;
+    };
+    let Ok(entry) = native_character::entry_state(chr.identity) else {
+        return true;
+    };
+    flags.native_death_marked()
+        || (entry.native_state_bytes[2] & 0x01) != 0
         || runtime_chr_force_unloaded(chr)
         || runtime_chr_character_disabled(chr)
-        || (!chr.load_state.draw_group_enabled()
-            && (!chr.chr_flags1c5.enable_render() || !chr.chr_flags1c4.is_render_group_enabled()))
+        || (!native_character::load_requests(chr.identity.address)
+            .is_ok_and(|value| value.draw_group_requested())
+            && (!flags.model_enable_requested() || !flags.group_mask_result()))
 }
 
-fn scholar_is_lockable(chr: &eldenring::cs::ChrIns) -> bool {
-    let modifier = chr.chr_ctrl.as_ref().modifier.as_ref();
-    !modifier.data.action_flags.disable_lock_on()
+fn scholar_is_lockable(chr: &HudActor) -> bool {
+    let target = match native_vitals::identity(chr.identity.address) {
+        Ok(target) => target,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD lock-target identity rejected: {error}");
+            return false;
+        }
+    };
+    match native_character::lock_target_suppression(target) {
+        Ok(suppressed) => !suppressed,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD lock-target policy rejected: {error}");
+            false
+        }
+    }
 }
 
-fn scholar_is_excluded_model(chr: &eldenring::cs::ChrIns) -> bool {
-    let data = chr.modules.as_ref().data.as_ref();
-    chr.npc_id == 1000 || chr.character_id == 1000 || data.chara_init_param_id == 1000
+fn scholar_is_excluded_model(chr: &HudActor) -> bool {
+    if chr.resource_number == 1000 || chr.character_number == 1000 {
+        return true;
+    }
+    match native_character::initializer_override(chr.identity) {
+        Ok(id) => id == 1000,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD initializer exclusion observation rejected: {error}");
+            true
+        }
+    }
 }
 
-fn scholar_current_anim_id(chr: &eldenring::cs::ChrIns) -> i32 {
-    let time_act = chr.modules.as_ref().time_act.as_ref();
-    time_act.anim_queue[2].anim_id
-}
-
-fn scholar_reject_reason(chr: &eldenring::cs::ChrIns) -> Option<ScholarRejectReason> {
-    if matches!(
-        chr.chr_type,
-        ChrType::None
-            | ChrType::Local
-            | ChrType::WhitePhantom
-            | ChrType::Ghost
-            | ChrType::Ghost1
-            | ChrType::BloodstainGhost
-            | ChrType::BonfireGhost
-            | ChrType::MessageGhost
-            | ChrType::WhiteSummonNpc
-            | ChrType::BluePhantom
-    ) {
+fn scholar_reject_reason(chr: &HudActor) -> Option<ScholarRejectReason> {
+    let kind = match native_vitals::identity(chr.identity.address)
+        .and_then(native_character::kind_record)
+    {
+        Ok(kind) => kind,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD target kind-record rejected: {error}");
+            return Some(ScholarRejectReason::Type);
+        }
+    };
+    // Byte 1 is the actual native classification-table predicate. Do not freeze its
+    // writable initializers or infer the network role of the remaining table bytes.
+    // Raw 19 retains the experimental consumer policy documented by the adapter.
+    if kind.selected_bytes[0] != 0 || matches!(kind.selection.raw_kind, -1 | 0 | 1 | 17 | 19) {
         return Some(ScholarRejectReason::Type);
     }
 
-    if scholar_is_event_hidden(chr) || !scholar_is_lockable(chr) || scholar_is_excluded_model(chr)
-    {
+    if scholar_is_event_hidden(chr) || !scholar_is_lockable(chr) || scholar_is_excluded_model(chr) {
         return Some(ScholarRejectReason::Hidden);
     }
 
-    let data = chr.modules.as_ref().data.as_ref();
-    if data.hp <= 0 || data.max_hp <= 0 {
+    let data = match native_vitals::observe(chr.identity.address) {
+        Ok(value) => value.hp,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD target vital copy rejected: {error}");
+            return Some(ScholarRejectReason::Hp);
+        }
+    };
+    if data.current <= 0 || data.maximum <= 0 {
         return Some(ScholarRejectReason::Hp);
     }
 
@@ -2618,7 +2340,7 @@ fn scholar_progress_stage(progress: f32) -> Option<usize> {
 }
 
 fn valid_screen_pos(pos: [f32; 2]) -> Option<[f32; 2]> {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+    let Ok(window) = native_camera::HudWindow::observe() else {
         return None;
     };
     let width = window.screen_width as f32;
@@ -2785,10 +2507,9 @@ mod camera_depth_side_tests {
 #[cfg(test)]
 mod undertaker_auto_dodge_tests {
     use super::{
-        AtomicU64, Ordering, SP_UNDERTAKER_AUTO_DODGE_TRIGGER,
-        UNDERTAKER_PENDING_UNKNOWN_ATTACK, UndertakerHitDispatchAction,
-        capture_undertaker_pending_attack, find_unique_pattern_in_range,
-        pack_undertaker_pending_attack, undertaker_dodge_effects,
+        AtomicU64, Ordering, SP_UNDERTAKER_AUTO_DODGE_TRIGGER, UNDERTAKER_PENDING_UNKNOWN_ATTACK,
+        UndertakerHitDispatchAction, capture_undertaker_pending_attack,
+        find_unique_pattern_in_range, pack_undertaker_pending_attack, undertaker_dodge_effects,
         undertaker_hit_dispatch_action, undertaker_inflated_hit_radius,
         unpack_undertaker_pending_attack, valid_undertaker_hit_radius,
     };
@@ -2800,12 +2521,18 @@ mod undertaker_auto_dodge_tests {
         payload[0x44..0x48].copy_from_slice(&1i32.to_le_bytes());
         let pending = capture_undertaker_pending_attack(payload.as_ptr() as usize);
         payload.fill(0xff);
-        assert_eq!(unpack_undertaker_pending_attack(pending), Some((1, 2110460)));
+        assert_eq!(
+            unpack_undertaker_pending_attack(pending),
+            Some((1, 2110460))
+        );
         assert_eq!(
             capture_undertaker_pending_attack(payload.as_ptr() as usize),
             UNDERTAKER_PENDING_UNKNOWN_ATTACK,
         );
-        assert_eq!(capture_undertaker_pending_attack(0), UNDERTAKER_PENDING_UNKNOWN_ATTACK);
+        assert_eq!(
+            capture_undertaker_pending_attack(0),
+            UNDERTAKER_PENDING_UNKNOWN_ATTACK
+        );
     }
 
     #[test]
@@ -2838,7 +2565,9 @@ mod undertaker_auto_dodge_tests {
                 _ => None,
             };
             assert_eq!(
-                undertaker_dodge_effects(pack_undertaker_pending_attack(100, 0), |_, _| Some(direction)),
+                undertaker_dodge_effects(pack_undertaker_pending_attack(100, 0), |_, _| Some(
+                    direction
+                )),
                 [expected, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)],
             );
         }
@@ -2848,14 +2577,17 @@ mod undertaker_auto_dodge_tests {
     fn same_atk_id_in_npc_and_pc_tables_uses_the_exact_source_table() {
         for (source, expected) in [(0, 880933), (1, 880934)] {
             let mut calls = 0;
-            let effects = undertaker_dodge_effects(pack_undertaker_pending_attack(100, source), |table, id| {
-                calls += 1;
-                match (table, id) {
-                    (0, 100) => Some(3),
-                    (1, 100) => Some(4),
-                    _ => None,
-                }
-            });
+            let effects = undertaker_dodge_effects(
+                pack_undertaker_pending_attack(100, source),
+                |table, id| {
+                    calls += 1;
+                    match (table, id) {
+                        (0, 100) => Some(3),
+                        (1, 100) => Some(4),
+                        _ => None,
+                    }
+                },
+            );
             assert_eq!(calls, 1);
             assert_eq!(effects, [Some(expected), Some(880922)]);
         }
@@ -2863,9 +2595,14 @@ mod undertaker_auto_dodge_tests {
 
     #[test]
     fn unknown_or_missing_attack_keeps_only_generic_and_empty_queue_does_nothing() {
-        assert_eq!(undertaker_dodge_effects(0, |_, _| panic!("empty queue lookup")), [None, None]);
         assert_eq!(
-            undertaker_dodge_effects(UNDERTAKER_PENDING_UNKNOWN_ATTACK, |_, _| panic!("unknown key lookup")),
+            undertaker_dodge_effects(0, |_, _| panic!("empty queue lookup")),
+            [None, None]
+        );
+        assert_eq!(
+            undertaker_dodge_effects(UNDERTAKER_PENDING_UNKNOWN_ATTACK, |_, _| panic!(
+                "unknown key lookup"
+            )),
             [None, Some(880922)],
         );
         assert_eq!(
@@ -2879,38 +2616,36 @@ mod undertaker_auto_dodge_tests {
         let pending = AtomicU64::new(0);
         let first = pack_undertaker_pending_attack(100, 0);
         let second = pack_undertaker_pending_attack(200, 1);
-        assert_eq!(pending.compare_exchange(0, first, Ordering::AcqRel, Ordering::Acquire), Ok(0));
-        assert_eq!(pending.compare_exchange(0, second, Ordering::AcqRel, Ordering::Acquire), Err(first));
+        assert_eq!(
+            pending.compare_exchange(0, first, Ordering::AcqRel, Ordering::Acquire),
+            Ok(0)
+        );
+        assert_eq!(
+            pending.compare_exchange(0, second, Ordering::AcqRel, Ordering::Acquire),
+            Err(first)
+        );
         assert_eq!(pending.swap(0, Ordering::AcqRel), first);
         assert_eq!(pending.swap(0, Ordering::AcqRel), 0);
-        assert_eq!(pending.compare_exchange(0, second, Ordering::AcqRel, Ordering::Acquire), Ok(0));
+        assert_eq!(
+            pending.compare_exchange(0, second, Ordering::AcqRel, Ordering::Acquire),
+            Ok(0)
+        );
         pending.store(0, Ordering::Release);
         assert_eq!(pending.swap(0, Ordering::AcqRel), 0);
     }
 
     #[test]
     fn only_local_positive_sensor_contacts_trigger() {
-        let trigger = undertaker_hit_dispatch_action(
-            0x1000, 0x1000, true, true, true, false, 100, 0, 0,
-        );
+        let trigger =
+            undertaker_hit_dispatch_action(0x1000, 0x1000, true, true, true, false, 100, 0, 0);
         assert_eq!(trigger, UndertakerHitDispatchAction::Trigger);
 
         for action in [
-            undertaker_hit_dispatch_action(
-                0x2000, 0x1000, true, true, true, false, 100, 0, 0,
-            ),
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, false, true, true, false, 100, 0, 0,
-            ),
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, true, false, true, false, 100, 0, 0,
-            ),
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, true, true, false, false, 100, 0, 0,
-            ),
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, true, true, true, false, 100, 0, 200,
-            ),
+            undertaker_hit_dispatch_action(0x2000, 0x1000, true, true, true, false, 100, 0, 0),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, false, true, true, false, 100, 0, 0),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, true, false, true, false, 100, 0, 0),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, true, true, false, false, 100, 0, 0),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, true, true, true, false, 100, 0, 200),
         ] {
             assert_eq!(action, UndertakerHitDispatchAction::Forward);
         }
@@ -2919,27 +2654,19 @@ mod undertaker_auto_dodge_tests {
     #[test]
     fn pending_and_bounded_suppression_reject_duplicate_local_hits() {
         assert_eq!(
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, false, false, false, true, 100, 0, 0,
-            ),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, false, false, false, true, 100, 0, 0,),
             UndertakerHitDispatchAction::Reject,
         );
         assert_eq!(
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, false, false, false, false, 499, 500, 0,
-            ),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, false, false, false, false, 499, 500, 0,),
             UndertakerHitDispatchAction::Reject,
         );
         assert_eq!(
-            undertaker_hit_dispatch_action(
-                0x1000, 0x1000, false, false, false, false, 500, 500, 0,
-            ),
+            undertaker_hit_dispatch_action(0x1000, 0x1000, false, false, false, false, 500, 500, 0,),
             UndertakerHitDispatchAction::Forward,
         );
         assert_eq!(
-            undertaker_hit_dispatch_action(
-                0x2000, 0x1000, true, true, true, true, 100, 500, 0,
-            ),
+            undertaker_hit_dispatch_action(0x2000, 0x1000, true, true, true, true, 100, 500, 0,),
             UndertakerHitDispatchAction::Forward,
         );
     }
@@ -2974,16 +2701,8 @@ mod undertaker_auto_dodge_tests {
     }
 }
 
-
-fn update_local_damage_module(player: &mut eldenring::cs::PlayerIns) {
-    let chr_ins = &mut player.chr_ins as *mut _ as usize;
-    let module_bag = unsafe { *((chr_ins + CHR_MODULE_BAG_OFFSET) as *const usize) };
-    let damage_module = if module_bag == 0 {
-        0
-    } else {
-        unsafe { *((module_bag + MODULE_DAMAGE_OFFSET) as *const usize) }
-    };
-    LOCAL_DAMAGE_MODULE.store(damage_module, Ordering::Relaxed);
+fn update_local_damage_module(player: &mut HudPlayer) {
+    LOCAL_DAMAGE_MODULE.store(damage_module_from_chr_ins(&player.actor), Ordering::Relaxed);
 }
 
 fn append_damage_log(_line: &str) {

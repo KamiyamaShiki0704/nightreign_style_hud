@@ -1,19 +1,17 @@
-use std::{ffi::c_void, time::Duration};
+use std::ffi::c_void;
 
-use eldenring::{
-    cs::{
-        CSCamExt, CSCamera, CSHavokMan, CSWindowImp, GameMan, PlayerIns, WorldChrMan,
-    },
-    position::{HavokPosition, PositionDelta},
-    util::system::wait_for_system_init,
-};
-use fromsoftware_shared::{F32Vector4, FromStatic, program::Program};
+#[path = "../../../sdk_host.rs"]
+mod sdk_host;
 use hudhook::windows::Win32::Foundation::HINSTANCE;
 use hudhook::{
     ImguiRenderLoop,
-    hooks::dx12::ImguiDx12Hooks,
     imgui::{Context, ImColor32, Ui, sys},
 };
+use shikifsrs_elden_ring::{
+    cameras::PerspectiveCameraObservation, character_sets::CharacterIdentity,
+};
+use shikifsrs_overlay::hudhook;
+use shikifsrs_runtime::Error;
 
 const DEBUG_MAX_DISTANCE: f32 = 60.0;
 const DEBUG_RAY_FILTERS: [u32; 9] = [0, 1, 2, 4, 8, 16, 32, 64, 128];
@@ -28,26 +26,17 @@ const DEBUG_RAY_FAR_LINE_THICKNESS: f32 = 1.0;
 
 #[unsafe(no_mangle)]
 /// # Safety
-pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
-    debug::initialize::<ImguiDx12Hooks>(
-        hmodule,
-        reason,
-        || {
-            wait_for_system_init(&Program::current(), Duration::MAX)
-                .expect("Timeout waiting for system init");
-        },
-        CameraDebugHud,
-    )
+pub unsafe extern "C" fn DllMain(_: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
+    if reason == 1 {
+        let _ = sdk_host::start_overlay(|| Box::new(CameraDebugHud));
+    }
+    1
 }
 
 struct CameraDebugHud;
 
 impl ImguiRenderLoop for CameraDebugHud {
-    fn initialize(
-        &mut self,
-        ctx: &mut Context,
-        _render_context: &mut dyn hudhook::RenderContext,
-    ) {
+    fn initialize(&mut self, ctx: &mut Context, _render_context: &mut dyn hudhook::RenderContext) {
         ctx.io_mut().config_flags |= hudhook::imgui::ConfigFlags::NO_MOUSE_CURSOR_CHANGE;
     }
 
@@ -189,223 +178,186 @@ impl Default for GameCameraDebug {
 }
 
 fn camera_debug_snapshot() -> CameraDebugSnapshot {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
-        return CameraDebugSnapshot::default();
-    };
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
-        return CameraDebugSnapshot::default();
-    };
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
-        return CameraDebugSnapshot::default();
-    };
-    let Some(player) = world_chr_man.main_player.as_ref() else {
-        return CameraDebugSnapshot::default();
-    };
-
-    let width = window.screen_width as f32;
-    let height = window.screen_height as f32;
-    if width <= 0.0 || height <= 0.0 {
-        return CameraDebugSnapshot::default();
-    }
-
-    let cam = camera.pers_cam_1.as_ref();
-    let camera_pos = havok_to_array(cam.position());
-    let forward = normalize_delta(cam.forward()).unwrap_or([0.0, 0.0, 1.0]);
-    let right = normalize_delta(cam.right()).unwrap_or([1.0, 0.0, 0.0]);
-    let up = normalize_delta(cam.up()).unwrap_or([0.0, 1.0, 0.0]);
-    let player_physics = player.chr_ins.modules.as_ref().physics.as_ref();
-    let player_pos = havok_to_array(player_physics.position);
-    let camera_position = cam.position();
-    let camera_to_player = [
-        player_physics.position.0 - camera_position.0,
-        player_physics.position.1 - camera_position.1,
-        player_physics.position.2 - camera_position.2,
-    ];
-    let camera_to_player_distance = length3(camera_to_player);
-    let camera_relative = CameraRelativeDebug {
-        distance: camera_to_player_distance,
-        depth: dot3(camera_to_player, forward),
-        side: dot3(camera_to_player, right),
-        vertical: dot3(camera_to_player, up),
-        height_delta: player_physics.position.1 - camera_position.1,
-    };
-    let ray_origin = HavokPosition(
-        player_physics.position.0,
-        player_physics.position.1 + (player_physics.hit_height * 0.62).clamp(0.8, 2.2),
-        player_physics.position.2,
-        0.0,
-    );
-    let ray_hit = center_ray_hit(player, ray_origin, forward);
-    let ray_start_screen = project_position(
-        F32Vector4(ray_origin.0, ray_origin.1, ray_origin.2, 1.0),
-        cam,
-    );
-    let ray_end_world = ray_hit.map(|hit| hit.world).unwrap_or([
-        ray_origin.0 + forward[0] * DEBUG_MAX_DISTANCE,
-        ray_origin.1 + forward[1] * DEBUG_MAX_DISTANCE,
-        ray_origin.2 + forward[2] * DEBUG_MAX_DISTANCE,
-    ]);
-    let ray_end_screen = ray_hit.and_then(|hit| hit.screen).or_else(|| {
-        project_position(
-            F32Vector4(ray_end_world[0], ray_end_world[1], ray_end_world[2], 1.0),
-            cam,
-        )
-    });
-    let game_camera = unsafe { GameMan::instance() }
-        .ok()
-        .map(game_camera_debug)
-        .unwrap_or_default();
-
-    CameraDebugSnapshot {
-        valid: true,
-        screen: [width, height],
-        camera_mask: camera.camera_mask,
-        camera_pos,
-        camera_forward: forward,
-        camera_right: right,
-        camera_up: up,
-        camera_fov: cam.fov,
-        camera_aspect: cam.aspect_ratio,
-        camera_near: cam.near_plane,
-        camera_far: cam.far_plane,
-        camera_yaw_deg: forward[0].atan2(forward[2]).to_degrees(),
-        camera_pitch_deg: forward[1].clamp(-1.0, 1.0).asin().to_degrees(),
-        player_pos,
-        player_hit_height: player_physics.hit_height,
-        ray_origin: havok_to_array(ray_origin),
-        ray_start_screen,
-        ray_end_screen,
-        ray_hit,
-        ray_samples: forward_sample_points(cam, ray_origin, forward),
-        camera_to_player: camera_relative,
-        game_camera,
-    }
+    sdk_host::with_objects(|objects, epoch| {
+        let absent = || Error::NativeOperationRejected("camera debug input absent");
+        let window = objects.window()?.ok_or_else(absent)?.configured_extent()?;
+        let camera = objects.cameras()?.ok_or_else(absent)?;
+        let cam = objects
+            .perspective_camera(camera.perspectives[0].ok_or_else(absent)?.address)?
+            .ok_or_else(absent)?;
+        let player = objects.primary_player_identity(epoch)?.ok_or_else(absent)?;
+        let spatial = objects.character_spatial(player)?.ok_or_else(absent)?;
+        let physics = objects.character_physics(player)?.ok_or_else(absent)?;
+        let player_pos = spatial.finite_position()?;
+        let hit_height = physics.collision_dimensions()[0][0];
+        if !hit_height.is_finite() {
+            return Err(Error::InvalidProfile("nonfinite player collision height"));
+        }
+        let matrix = cam.matrix_bits.map(|row| row.map(f32::from_bits));
+        let camera_pos = [matrix[3][0], matrix[3][1], matrix[3][2]];
+        if matrix.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(Error::InvalidProfile("nonfinite camera matrix"));
+        }
+        let forward =
+            normalize_delta([matrix[2][0], matrix[2][1], matrix[2][2]]).unwrap_or([0.0, 0.0, 1.0]);
+        let right =
+            normalize_delta([matrix[0][0], matrix[0][1], matrix[0][2]]).unwrap_or([1.0, 0.0, 0.0]);
+        let up =
+            normalize_delta([matrix[1][0], matrix[1][1], matrix[1][2]]).unwrap_or([0.0, 1.0, 0.0]);
+        let difference = std::array::from_fn(|i| player_pos[i] - camera_pos[i]);
+        let relative = CameraRelativeDebug {
+            distance: length3(difference),
+            depth: dot3(difference, forward),
+            side: dot3(difference, right),
+            vertical: dot3(difference, up),
+            height_delta: difference[1],
+        };
+        let screen = [window.width as f32, window.height as f32];
+        let origin = [
+            player_pos[0],
+            player_pos[1] + (hit_height * 0.62).clamp(0.8, 2.2),
+            player_pos[2],
+        ];
+        let ray_hit = center_ray_hit(player, origin, forward, &cam, screen)?;
+        let ray_end = ray_hit.map(|h| h.world).unwrap_or_else(|| {
+            std::array::from_fn(|i| origin[i] + forward[i] * DEBUG_MAX_DISTANCE)
+        });
+        let state = objects.game_camera_state(epoch)?.ok_or_else(absent)?;
+        let overrides = objects.game_camera_overrides(epoch)?.ok_or_else(absent)?;
+        let ids = state.parameter_ids;
+        let floats = overrides.payload.scalar_bits.map(f32::from_bits);
+        let game_camera = GameCameraDebug {
+            normal_param: ids[0],
+            locked_param: ids[1],
+            talk_param: ids[2],
+            lock_on_param: ids[3],
+            chr_lock_on_param: ids[4],
+            follow_dummy_poly: ids[5],
+            zoom_target_dist_mult: floats[0],
+            override_lerp_factor: floats[1],
+            zoom_progress: floats[2],
+            timed_override_duration: floats[3],
+            zoom_override_lerp_factor: floats[4],
+            force_vertical_deg: f32::from_bits(state.force_angle_bits[0]).to_degrees(),
+            force_horizontal_deg: f32::from_bits(state.force_angle_bits[1]).to_degrees(),
+            force_method: state.force_method_raw,
+            force_progress: f32::from_bits(state.force_progress_bits),
+            force_first_execution: state.force_flag_bytes[0] != 0,
+            force_vertical_enabled: state.force_flag_bytes[1] != 0,
+            force_horizontal_enabled: state.force_flag_bytes[2] != 0,
+        };
+        let frustum = cam.frustum_bits.map(f32::from_bits);
+        if objects.character_identity(player.address, epoch)? != Some(player) {
+            return Err(Error::NativeOperationRejected(
+                "camera debug player changed",
+            ));
+        }
+        Ok(CameraDebugSnapshot {
+            valid: true,
+            screen,
+            camera_mask: camera.native_flags,
+            camera_pos,
+            camera_forward: forward,
+            camera_right: right,
+            camera_up: up,
+            camera_fov: frustum[0],
+            camera_aspect: frustum[1],
+            camera_near: frustum[2],
+            camera_far: frustum[3],
+            camera_yaw_deg: forward[0].atan2(forward[2]).to_degrees(),
+            camera_pitch_deg: forward[1].clamp(-1.0, 1.0).asin().to_degrees(),
+            player_pos,
+            player_hit_height: hit_height,
+            ray_origin: origin,
+            ray_start_screen: project_position(origin, &cam, screen),
+            ray_end_screen: ray_hit
+                .and_then(|h| h.screen)
+                .or_else(|| project_position(ray_end, &cam, screen)),
+            ray_hit,
+            ray_samples: forward_sample_points(&cam, origin, forward, screen),
+            camera_to_player: relative,
+            game_camera,
+        })
+    })
+    .unwrap_or_default()
 }
-
-fn game_camera_debug(game_man: &GameMan) -> GameCameraDebug {
-    GameCameraDebug {
-        normal_param: game_man.normal_camera_param_id,
-        locked_param: game_man.locked_camera_param_id,
-        talk_param: game_man.talk_esd_camera_param_id,
-        lock_on_param: game_man.lock_on_camera_param_id,
-        chr_lock_on_param: game_man.camera_chr_lock_on_param_id,
-        follow_dummy_poly: game_man.camera_follow_dummy_poly_id,
-        zoom_target_dist_mult: game_man.camera_zoom_target_dist_mult,
-        override_lerp_factor: game_man.cam_override_lerp_factor,
-        zoom_progress: game_man.cam_zoom_interpolated_progress,
-        timed_override_duration: game_man.cam_timed_override_duration,
-        zoom_override_lerp_factor: game_man.cam_zoom_override_lerp_factor,
-        force_vertical_deg: game_man.force_cam_vertical_angle_rad.to_degrees(),
-        force_horizontal_deg: game_man.force_cam_horizontal_angle_rad.to_degrees(),
-        force_method: game_man.force_cam_rotation_method as u32,
-        force_progress: game_man.force_cam_interpolation_progress,
-        force_vertical_enabled: game_man.force_cam_vertical_enabled,
-        force_horizontal_enabled: game_man.force_cam_horizontal_enabled,
-        force_first_execution: game_man.force_cam_first_execution,
-    }
-}
-
-fn center_ray_hit(player: &PlayerIns, origin: HavokPosition, forward: [f32; 3]) -> Option<RayHitDebug> {
-    let Ok(havok) = (unsafe { CSHavokMan::instance() }) else {
-        return None;
-    };
-    let delta = PositionDelta(
-        forward[0] * DEBUG_MAX_DISTANCE,
-        forward[1] * DEBUG_MAX_DISTANCE,
-        forward[2] * DEBUG_MAX_DISTANCE,
-    );
+fn center_ray_hit(
+    player: CharacterIdentity,
+    origin: [f32; 3],
+    forward: [f32; 3],
+    camera: &PerspectiveCameraObservation,
+    screen: [f32; 2],
+) -> shikifsrs_runtime::Result<Option<RayHitDebug>> {
+    let delta = forward.map(|v| v * DEBUG_MAX_DISTANCE);
     let mut best: Option<RayHitDebug> = None;
     for filter in DEBUG_RAY_FILTERS {
-        let Some(hit) = havok
-            .phys_world
-            .as_ref()
-            .cast_ray(filter, &origin, delta, player)
-        else {
+        let Some(hit) = sdk_host::cast_line(player, filter, origin, delta)? else {
             continue;
         };
-        let distance = distance_havok(origin, hit);
-        if !distance.is_finite() || distance <= 0.0 || distance > DEBUG_MAX_DISTANCE {
+        let distance = length3(std::array::from_fn(|i| origin[i] - hit[i]));
+        if !distance.is_finite()
+            || distance <= 0.0
+            || distance > DEBUG_MAX_DISTANCE
+            || best.is_some_and(|b| distance >= b.distance)
+        {
             continue;
         }
-        if best.is_some_and(|best| distance >= best.distance) {
-            continue;
-        }
-        let screen = unsafe { CSCamera::instance() }
-            .ok()
-            .and_then(|camera| {
-                project_position(
-                    F32Vector4(hit.0, hit.1, hit.2, 1.0),
-                    camera.pers_cam_1.as_ref(),
-                )
-            });
         best = Some(RayHitDebug {
             filter,
             distance,
-            world: havok_to_array(hit),
-            screen,
+            world: hit,
+            screen: project_position(hit, camera, screen),
         });
     }
-    best
+    Ok(best)
 }
-
 fn forward_sample_points(
-    cam: &eldenring::cs::CSPersCam,
-    origin: HavokPosition,
+    camera: &PerspectiveCameraObservation,
+    origin: [f32; 3],
     forward: [f32; 3],
+    screen: [f32; 2],
 ) -> [Option<[f32; 2]>; DEBUG_RAY_SAMPLE_DISTANCES.len()] {
     DEBUG_RAY_SAMPLE_DISTANCES.map(|distance| {
         project_position(
-            F32Vector4(
-                origin.0 + forward[0] * distance,
-                origin.1 + forward[1] * distance,
-                origin.2 + forward[2] * distance,
-                1.0,
-            ),
-            cam,
+            std::array::from_fn(|i| origin[i] + forward[i] * distance),
+            camera,
+            screen,
         )
     })
 }
-
-fn project_position(position: F32Vector4, camera: &eldenring::cs::CSPersCam) -> Option<[f32; 2]> {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
-        return None;
-    };
-    let width = window.screen_width as f32;
-    let height = window.screen_height as f32;
-    if width <= 0.0 || height <= 0.0 {
+fn project_position(
+    position: [f32; 3],
+    camera: &PerspectiveCameraObservation,
+    screen: [f32; 2],
+) -> Option<[f32; 2]> {
+    let [width, height] = screen;
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
         return None;
     }
-
-    let matrix = camera.matrix;
-    let rel = [
-        position.0 - matrix.3.0,
-        position.1 - matrix.3.1,
-        position.2 - matrix.3.2,
-    ];
-
-    let fov = camera.fov;
+    let matrix = camera.matrix_bits.map(|row| row.map(f32::from_bits));
+    let rel = std::array::from_fn(|i| position[i] - matrix[3][i]);
+    let [fov, aspect, _, _] = camera.frustum_bits.map(f32::from_bits);
     if !fov.is_finite() || fov <= 0.0 {
         return None;
     }
-    let fov_radians = if fov > std::f32::consts::PI {
+    let radians = if fov > std::f32::consts::PI {
         fov.to_radians()
     } else {
         fov
     };
-    let tan_half_fov = (fov_radians * 0.5).tan();
+    let tan_half_fov = (radians * 0.5).tan();
     if tan_half_fov.abs() < 0.001 {
         return None;
     }
-    let aspect = if camera.aspect_ratio.is_finite() && camera.aspect_ratio > 0.0 {
-        camera.aspect_ratio
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
     } else {
         width / height
     };
-
     let axes = (
-        [matrix.0.0, matrix.0.1, matrix.0.2],
-        [matrix.1.0, matrix.1.1, matrix.1.2],
-        [matrix.2.0, matrix.2.1, matrix.2.2],
+        [matrix[0][0], matrix[0][1], matrix[0][2]],
+        [matrix[1][0], matrix[1][1], matrix[1][2]],
+        [matrix[2][0], matrix[2][1], matrix[2][2]],
     );
     project_with_camera_axes(rel, axes, width, height, aspect, tan_half_fov)
 }
@@ -461,12 +413,20 @@ fn draw_camera_debug_overlay(ui: &Ui, snapshot: CameraDebugSnapshot) {
     let yellow = ImColor32::from_rgba(255, 210, 70, 235);
     let orange = ImColor32::from_rgba(255, 154, 70, 235);
 
-    draw.add_line([center[0] - 26.0, center[1]], [center[0] + 26.0, center[1]], white)
-        .thickness(2.2)
-        .build();
-    draw.add_line([center[0], center[1] - 26.0], [center[0], center[1] + 26.0], white)
-        .thickness(2.2)
-        .build();
+    draw.add_line(
+        [center[0] - 26.0, center[1]],
+        [center[0] + 26.0, center[1]],
+        white,
+    )
+    .thickness(2.2)
+    .build();
+    draw.add_line(
+        [center[0], center[1] - 26.0],
+        [center[0], center[1] + 26.0],
+        white,
+    )
+    .thickness(2.2)
+    .build();
     draw.add_circle(center, 7.0, white)
         .num_segments(32)
         .thickness(2.0)
@@ -508,7 +468,10 @@ fn draw_camera_debug_overlay(ui: &Ui, snapshot: CameraDebugSnapshot) {
                 .build();
         }
     }
-    if let Some(hit) = snapshot.ray_hit.and_then(|hit| hit.screen.map(|screen| (hit, screen))) {
+    if let Some(hit) = snapshot
+        .ray_hit
+        .and_then(|hit| hit.screen.map(|screen| (hit, screen)))
+    {
         draw_marker(hit.1, yellow, ray_visual_marker_size(hit.0.distance) * 1.35);
     }
 
@@ -615,13 +578,14 @@ fn draw_camera_debug_overlay(ui: &Ui, snapshot: CameraDebugSnapshot) {
             [28.0, 28.0 + index as f32 * DEBUG_TEXT_STEP],
             DEBUG_TEXT_SIZE,
             white,
-            &line,
+            line,
         );
     }
 }
 
 fn ray_visual_t(distance: f32) -> f32 {
-    ((distance - DEBUG_RAY_NEAR_SCALE_DISTANCE) / (DEBUG_MAX_DISTANCE - DEBUG_RAY_NEAR_SCALE_DISTANCE))
+    ((distance - DEBUG_RAY_NEAR_SCALE_DISTANCE)
+        / (DEBUG_MAX_DISTANCE - DEBUG_RAY_NEAR_SCALE_DISTANCE))
         .clamp(0.0, 1.0)
 }
 
@@ -650,7 +614,10 @@ fn draw_marker(pos: [f32; 2], color: ImColor32, size: f32) {
         let col: u32 = color.into();
         sys::ImDrawList_AddCircle(
             draw,
-            sys::ImVec2 { x: pos[0], y: pos[1] },
+            sys::ImVec2 {
+                x: pos[0],
+                y: pos[1],
+            },
             size,
             col,
             48,
@@ -719,20 +686,9 @@ fn draw_text(pos: [f32; 2], font_size: f32, color: ImColor32, text: &str) {
     }
 }
 
-fn normalize_delta(delta: PositionDelta) -> Option<[f32; 3]> {
-    let len = (delta.0 * delta.0 + delta.1 * delta.1 + delta.2 * delta.2).sqrt();
-    (len.is_finite() && len > 0.001).then_some([delta.0 / len, delta.1 / len, delta.2 / len])
-}
-
-fn havok_to_array(pos: HavokPosition) -> [f32; 3] {
-    [pos.0, pos.1, pos.2]
-}
-
-fn distance_havok(a: HavokPosition, b: HavokPosition) -> f32 {
-    let dx = a.0 - b.0;
-    let dy = a.1 - b.1;
-    let dz = a.2 - b.2;
-    (dx * dx + dy * dy + dz * dz).sqrt()
+fn normalize_delta(delta: [f32; 3]) -> Option<[f32; 3]> {
+    let length = length3(delta);
+    (length.is_finite() && length > 0.001).then(|| delta.map(|v| v / length))
 }
 
 fn length3(value: [f32; 3]) -> f32 {
@@ -745,4 +701,57 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shikifsrs_elden_ring::objects::{ObjectKind, ObjectObservation};
+    fn camera(fov: f32, aspect: f32) -> PerspectiveCameraObservation {
+        let rows = [
+            [1.0f32, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        PerspectiveCameraObservation {
+            camera: ObjectObservation {
+                address: 16,
+                kind: ObjectKind::PerspectiveCamera,
+            },
+            matrix_bits: rows.map(|row| row.map(f32::to_bits)),
+            frustum_bits: [
+                fov.to_bits(),
+                aspect.to_bits(),
+                0.1f32.to_bits(),
+                100.0f32.to_bits(),
+            ],
+        }
+    }
+    #[test]
+    fn copied_projection_retains_signed_axes_and_invalid_input_rejection() {
+        let camera = camera(std::f32::consts::FRAC_PI_2, 1.0);
+        let screen = [100.0, 100.0];
+        assert_eq!(
+            project_position([0.0, 0.0, 10.0], &camera, screen),
+            Some([50.0, 50.0])
+        );
+        let right = project_position([2.0, 0.0, 10.0], &camera, screen).unwrap();
+        assert!((right[0] - 60.0).abs() < 0.0001 && (right[1] - 50.0).abs() < 0.0001);
+        let back = project_position([2.0, 0.0, -10.0], &camera, screen).unwrap();
+        assert!((back[0] - 40.0).abs() < 0.0001 && (back[1] - 50.0).abs() < 0.0001);
+        assert!(project_position([0.0, 0.0, 0.0], &camera, screen).is_none());
+        assert!(project_position([f32::NAN, 0.0, 10.0], &camera, screen).is_none());
+        assert!(project_position([0.0, 0.0, 10.0], &camera, [0.0, 100.0]).is_none());
+    }
+    #[test]
+    fn camera_samples_keep_configured_distances_and_degrees_fov_fallback() {
+        let cam = camera(90.0, 0.0);
+        let points = forward_sample_points(&cam, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [200.0, 100.0]);
+        assert_eq!(points, [Some([100.0, 50.0]); 7]);
+        assert_eq!(DEBUG_RAY_FILTERS, [0, 1, 2, 4, 8, 16, 32, 64, 128]);
+        assert!(normalize_delta([0.0, 0.0, 0.0]).is_none());
+        assert!(normalize_delta([f32::INFINITY, 0.0, 0.0]).is_none());
+        assert_eq!(normalize_delta([0.0, 0.0, 2.0]), Some([0.0, 0.0, 1.0]));
+    }
 }

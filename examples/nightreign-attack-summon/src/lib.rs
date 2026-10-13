@@ -1,174 +1,101 @@
+use serde::Deserialize;
 use std::{
     ffi::{OsString, c_void},
     fs,
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
     sync::{
-        LazyLock, Mutex, Once, OnceLock,
+        OnceLock,
         atomic::{AtomicIsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
-
-use eldenring::{
-    cs::{
-        CSCamExt, CSCamera, CSTaskGroupIndex, CSTaskImp, ChrDebugSpawnRequest, ChrIns, ChrInsExt,
-        FieldInsHandle, WorldChrMan,
-    },
-    fd4::FD4TaskData,
-    position::HavokPosition,
-    util::system::wait_for_system_init,
-};
-use fromsoftware_shared::{F32Vector4, FromStatic, SharedTaskImpExt, program::Program};
-use serde::Deserialize;
 use windows::Win32::{
     Foundation::{HINSTANCE, HMODULE},
     System::LibraryLoader::GetModuleFileNameW,
 };
-
+mod creation;
+mod native;
+#[path = "../../../character_runtime.rs"]
+mod presentation;
+// Exercise the real main-HUD parameter adapter while that member's remaining native APIs are ported.
+// This temporary bridge is removed once the main member compiles its own tests.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_parameters.rs"]
+mod hud_parameter_contracts;
+#[allow(dead_code)] // Shared renderer/query host, separately compiled task-only DLL.
+#[path = "../../../sdk_host.rs"]
+mod sdk_host;
 const DLL_PROCESS_ATTACH: u32 = 1;
 const CONFIG_FILE_NAME: &str = "summon.toml";
-
-static INSTALL_TASKS: Once = Once::new();
 static DLL_MODULE: AtomicIsize = AtomicIsize::new(0);
 static SETTINGS: OnceLock<AttackSummonSettings> = OnceLock::new();
-static STATE: LazyLock<Mutex<AttackSummonState>> =
-    LazyLock::new(|| Mutex::new(AttackSummonState::default()));
-
-#[unsafe(no_mangle)]
 /// # Safety
-pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
-    DLL_MODULE.store(hmodule.0 as isize, Ordering::Relaxed);
-    if reason != DLL_PROCESS_ATTACH {
-        return 1;
+/// Windows loader provides the module; host retains DLL until worker pins it.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DllMain(module: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
+    if reason == DLL_PROCESS_ATTACH {
+        DLL_MODULE.store(module.0 as isize, Ordering::Relaxed);
+        thread::spawn(|| {
+            let _ = settings();
+            if let Err(error) =
+                sdk_host::initialize().and_then(|()| native::install().map_err(|e| e.to_string()))
+            {
+                eprintln!("attack summon initialization rejected: {error}");
+            }
+        });
     }
-
-    thread::spawn(|| {
-        let _ = settings();
-        if wait_for_system_init(&Program::current(), Duration::MAX).is_ok() {
-            install_tasks_once();
-        }
-    });
-
     1
 }
-
-fn install_tasks_once() {
-    INSTALL_TASKS.call_once(|| {
-        let Ok(task_imp) = CSTaskImp::wait_for_instance(Duration::from_secs(30)) else {
-            return;
-        };
-
-        let attack_summon = task_imp.run_recurring(
-            attack_summon_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::ChrIns_PostPhysics,
-        );
-        std::mem::forget(attack_summon);
-    });
-}
-
-fn attack_summon_task(_: &FD4TaskData) {
-    let settings = settings();
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        if let Ok(mut state) = STATE.lock() {
-            state.summons.clear();
-        }
-        return;
-    };
-
-    let now = Instant::now();
-    let Ok(mut state) = STATE.lock() else {
-        return;
-    };
-
-    state.ensure_trigger_slots(settings.summons.len());
-    state.update_existing(world_chr_man, now, settings);
-
-    let Some((player_pos, triggers)) = consume_player_triggers(world_chr_man, settings) else {
-        state.release_all(world_chr_man);
-        return;
-    };
-    if triggers.is_empty() {
-        return;
-    }
-
-    let (forward, right) = camera_horizontal_axes();
-    for config_index in triggers {
-        if state.active_count() >= settings.max_active_summons {
-            break;
-        }
-        if !state.accept_trigger(config_index, now, settings) {
-            continue;
-        }
-        state.activate_or_spawn(
-            world_chr_man,
-            config_index,
-            now,
-            player_pos,
-            forward,
-            right,
-            settings,
-        );
-    }
-}
-
-fn consume_player_triggers(
-    world_chr_man: &mut WorldChrMan,
-    settings: &AttackSummonSettings,
-) -> Option<(HavokPosition, Vec<usize>)> {
-    let player = world_chr_man.main_player.as_mut()?;
-    let active_effects = player
-        .chr_ins
-        .special_effect
-        .entries()
-        .map(|entry| entry.param_id)
-        .collect::<Vec<_>>();
-
-    let triggers = settings
-        .summons
-        .iter()
-        .enumerate()
-        .filter_map(|(index, config)| {
-            active_effects
-                .contains(&config.trigger_speffect)
-                .then_some(index)
-        })
-        .collect::<Vec<_>>();
-
-    for index in &triggers {
-        player
-            .chr_ins
-            .remove_speffect(settings.summons[*index].trigger_speffect);
-    }
-
-    Some((
-        player.chr_ins.modules.as_ref().physics.as_ref().position,
-        triggers,
-    ))
-}
-
-fn camera_horizontal_axes() -> ((f32, f32, f32), (f32, f32, f32)) {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
-        return ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0));
-    };
-
-    let forward = camera.pers_cam_1.forward();
-    let right = camera.pers_cam_1.right();
-    (
-        normalize_horizontal((forward.0, forward.1, forward.2), (0.0, 0.0, 1.0)),
-        normalize_horizontal((right.0, right.1, right.2), (1.0, 0.0, 0.0)),
-    )
-}
-
-fn normalize_horizontal(vector: (f32, f32, f32), fallback: (f32, f32, f32)) -> (f32, f32, f32) {
-    let len = (vector.0 * vector.0 + vector.2 * vector.2).sqrt();
+fn normalize_horizontal(v: (f32, f32, f32), fallback: (f32, f32, f32)) -> (f32, f32, f32) {
+    let len = (v.0 * v.0 + v.2 * v.2).sqrt();
     if len <= 0.001 || !len.is_finite() {
-        return fallback;
+        fallback
+    } else {
+        (v.0 / len, 0.0, v.2 / len)
     }
-    (vector.0 / len, 0.0, vector.2 / len)
 }
-
+fn summon_position(
+    player: [f32; 4],
+    forward: (f32, f32, f32),
+    right: (f32, f32, f32),
+    config: AttackSummonConfig,
+    settings: &AttackSummonSettings,
+) -> [f32; 4] {
+    [
+        player[0]
+            + forward.0 * config.spawn_forward_distance(settings)
+            + right.0 * config.side_offset,
+        player[1] + config.spawn_height_offset(settings),
+        player[2]
+            + forward.2 * config.spawn_forward_distance(settings)
+            + right.2 * config.side_offset,
+        0.0,
+    ]
+}
+#[derive(Default)]
+struct Cooldowns {
+    last_any_trigger: Option<Instant>,
+    last_trigger_by_slot: Vec<Option<Instant>>,
+}
+impl Cooldowns {
+    fn accept(&mut self, index: usize, now: Instant, settings: &AttackSummonSettings) -> bool {
+        self.last_trigger_by_slot
+            .resize(settings.summons.len(), None);
+        if self.last_any_trigger.is_some_and(|last| {
+            now.saturating_duration_since(last) < settings.any_trigger_cooldown()
+        }) || self.last_trigger_by_slot[index].is_some_and(|last| {
+            now.saturating_duration_since(last) < settings.same_trigger_cooldown()
+        }) {
+            return false;
+        }
+        self.last_any_trigger = Some(now);
+        self.last_trigger_by_slot[index] = Some(now);
+        true
+    }
+}
 #[derive(Clone, Deserialize)]
 struct AttackSummonSettings {
     #[serde(default = "default_marker_speffect")]
@@ -349,405 +276,6 @@ impl AttackSummonConfig {
     }
 }
 
-#[derive(Clone, Copy)]
-struct AttackSummonInstance {
-    config_index: usize,
-    requested_at: Instant,
-    expires_at: Instant,
-    handle: Option<FieldInsHandle>,
-    active: bool,
-    pending_bind: bool,
-}
-
-#[derive(Default)]
-struct AttackSummonState {
-    summons: Vec<AttackSummonInstance>,
-    last_any_trigger: Option<Instant>,
-    last_trigger_by_slot: Vec<Option<Instant>>,
-}
-
-impl AttackSummonState {
-    fn ensure_trigger_slots(&mut self, count: usize) {
-        if self.last_trigger_by_slot.len() != count {
-            self.last_trigger_by_slot.resize(count, None);
-        }
-    }
-
-    fn accept_trigger(
-        &mut self,
-        config_index: usize,
-        now: Instant,
-        settings: &AttackSummonSettings,
-    ) -> bool {
-        if self
-            .last_any_trigger
-            .is_some_and(|last| now.duration_since(last) < settings.any_trigger_cooldown())
-        {
-            return false;
-        }
-        if self.last_trigger_by_slot[config_index]
-            .is_some_and(|last| now.duration_since(last) < settings.same_trigger_cooldown())
-        {
-            return false;
-        }
-
-        self.last_any_trigger = Some(now);
-        self.last_trigger_by_slot[config_index] = Some(now);
-        true
-    }
-
-    fn active_count(&self) -> usize {
-        self.summons
-            .iter()
-            .filter(|summon| summon.active || summon.pending_bind)
-            .count()
-    }
-
-    fn activate_or_spawn(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        config_index: usize,
-        now: Instant,
-        player_pos: HavokPosition,
-        forward: (f32, f32, f32),
-        right: (f32, f32, f32),
-        settings: &AttackSummonSettings,
-    ) {
-        let config = settings.summons[config_index];
-        let position = summon_position(player_pos, forward, right, config, settings);
-
-        if settings.reuse_spawned_units {
-            if let Some(index) = self
-                .summons
-                .iter()
-                .position(|summon| summon.config_index == config_index)
-            {
-                if self.summons[index].active || self.summons[index].pending_bind {
-                    return;
-                }
-
-                if let Some(handle) = self.summons[index].handle {
-                    if let Some(chr) = chr_by_handle_mut(world_chr_man, handle) {
-                        activate_existing_summon(chr, position, config, settings);
-                        self.summons[index].requested_at = now;
-                        self.summons[index].expires_at = now + config.fallback_lifetime(settings);
-                        self.summons[index].active = true;
-                        self.summons[index].pending_bind = false;
-                        return;
-                    }
-                }
-
-                self.summons.swap_remove(index);
-            }
-        }
-
-        self.spawn_new(world_chr_man, config_index, now, position, settings);
-    }
-
-    fn spawn_new(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        config_index: usize,
-        now: Instant,
-        position: HavokPosition,
-        settings: &AttackSummonSettings,
-    ) {
-        let config = settings.summons[config_index];
-        world_chr_man.debug_chr_creator.last_created_chr = None;
-        world_chr_man.spawn_debug_character(&ChrDebugSpawnRequest {
-            chr_id: config.chr_id,
-            chara_init_param_id: config.chara_init_param_id,
-            npc_param_id: config.npc_param_id,
-            npc_think_param_id: config.npc_think_param_id,
-            event_entity_id: config.event_entity_id,
-            talk_id: config.talk_id,
-            is_player: config.is_player,
-            pos_x: position.0,
-            pos_y: position.1,
-            pos_z: position.2,
-        });
-
-        self.summons.push(AttackSummonInstance {
-            config_index,
-            requested_at: now,
-            expires_at: now + config.fallback_lifetime(settings),
-            handle: None,
-            active: true,
-            pending_bind: true,
-        });
-    }
-
-    fn update_existing(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        now: Instant,
-        settings: &AttackSummonSettings,
-    ) {
-        self.bind_last_created(world_chr_man, settings);
-
-        let mut index = 0;
-        while index < self.summons.len() {
-            let should_remove = {
-                let summon = &mut self.summons[index];
-                if !summon.active && !summon.pending_bind {
-                    false
-                } else if summon.handle.is_none() {
-                    now.duration_since(summon.requested_at) >= settings.unbound_timeout()
-                } else {
-                    summon_should_disappear(world_chr_man, summon, now, settings)
-                }
-            };
-
-            if should_remove {
-                if settings.reuse_spawned_units && self.summons[index].handle.is_some() {
-                    let summon = &mut self.summons[index];
-                    park_summon(world_chr_man, summon, settings);
-                    index += 1;
-                } else {
-                    let summon = self.summons.swap_remove(index);
-                    release_summon(world_chr_man, &summon);
-                }
-            } else {
-                index += 1;
-            }
-        }
-    }
-
-    fn bind_last_created(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        settings: &AttackSummonSettings,
-    ) {
-        let Some(mut chr_ptr) = world_chr_man.debug_chr_creator.last_created_chr else {
-            return;
-        };
-        let chr = unsafe { chr_ptr.as_mut() };
-        let Some((summon_index, config)) =
-            self.summons.iter().enumerate().find_map(|(index, summon)| {
-                let config = settings.summons[summon.config_index];
-                (summon.handle.is_none() && chr.npc_param_id == config.npc_param_id)
-                    .then_some((index, config))
-            })
-        else {
-            return;
-        };
-
-        prepare_summon(chr, config, settings);
-        chr.modules.as_mut().event.as_mut().request_animation_id = config.animation_id;
-        self.summons[summon_index].handle = Some(chr.field_ins_handle);
-        self.summons[summon_index].active = true;
-        self.summons[summon_index].pending_bind = false;
-        world_chr_man.debug_chr_creator.last_created_chr = None;
-    }
-
-    fn release_all(&mut self, world_chr_man: &mut WorldChrMan) {
-        for summon in &self.summons {
-            release_summon(world_chr_man, summon);
-        }
-        self.summons.clear();
-    }
-}
-
-fn summon_should_disappear(
-    world_chr_man: &mut WorldChrMan,
-    summon: &AttackSummonInstance,
-    now: Instant,
-    settings: &AttackSummonSettings,
-) -> bool {
-    if now >= summon.expires_at {
-        return true;
-    }
-    let config = settings.summons[summon.config_index];
-
-    let Some(handle) = summon.handle else {
-        return false;
-    };
-    let Some(chr) = chr_by_handle_mut(world_chr_man, handle) else {
-        return true;
-    };
-
-    if chr_dead_or_disabled(chr) || chr_has_speffect(chr, config.vanish_request_speffect(settings))
-    {
-        return true;
-    }
-
-    prepare_summon(chr, config, settings);
-    false
-}
-
-fn summon_position(
-    player_pos: HavokPosition,
-    forward: (f32, f32, f32),
-    right: (f32, f32, f32),
-    config: AttackSummonConfig,
-    settings: &AttackSummonSettings,
-) -> HavokPosition {
-    HavokPosition(
-        player_pos.0
-            + forward.0 * config.spawn_forward_distance(settings)
-            + right.0 * config.side_offset,
-        player_pos.1 + config.spawn_height_offset(settings),
-        player_pos.2
-            + forward.2 * config.spawn_forward_distance(settings)
-            + right.2 * config.side_offset,
-        0.0,
-    )
-}
-
-fn activate_existing_summon(
-    chr: &mut ChrIns,
-    position: HavokPosition,
-    config: AttackSummonConfig,
-    settings: &AttackSummonSettings,
-) {
-    chr.remove_speffect(config.vanish_request_speffect(settings));
-    prepare_summon(chr, config, settings);
-    move_summon(chr, position);
-    restore_summon_hp(chr);
-    chr.modules.as_mut().event.as_mut().request_animation_id = -1;
-    chr.modules.as_mut().event.as_mut().request_animation_id = config.animation_id;
-}
-
-fn move_summon(chr: &mut ChrIns, position: HavokPosition) {
-    let physics = chr.modules.as_mut().physics.as_mut();
-    physics.position = position;
-    physics.last_update_position = position;
-    chr.initial_position = position;
-    chr.chunk_position = F32Vector4(position.0, position.1, position.2, 0.0);
-}
-
-fn prepare_summon(chr: &mut ChrIns, config: AttackSummonConfig, settings: &AttackSummonSettings) {
-    let marker_speffect = config.marker_speffect(settings);
-    if !chr_has_speffect(chr, marker_speffect) {
-        chr.apply_speffect(marker_speffect, true);
-    }
-
-    chr.team_type = config.generated_team_type(settings);
-    chr.chr_ctrl
-        .as_mut()
-        .modifier
-        .as_mut()
-        .data
-        .action_flags
-        .set_disable_lock_on(config.disable_lock_on(settings));
-    chr.last_hit_by = FieldInsHandle::none();
-    chr.load_state.set_extinction_death(false);
-    chr.chr_flags1c4.set_is_render_group_enabled(true);
-    chr.chr_flags1c5.set_death_flag(false);
-    chr.chr_flags1c5.set_enable_render(true);
-    chr.chr_flags1c8.set_is_active(true);
-    chr.chr_activation_flags.set_activation_enabled(true);
-    chr.debug_flags.set_force_unloaded(false);
-    chr.debug_flags.set_force_loaded(true);
-    chr.debug_flags.set_character_disabled(false);
-    chr.debug_flags.set_disabled_updates(false);
-    chr.debug_flags.set_disabled_hit(false);
-    chr.debug_flags.set_disabled_movement(false);
-    chr.debug_flags.set_disabled_secondary_actions(false);
-    chr.opacity_keyframes_multiplier = 1.0;
-    chr.opacity_keyframes_multiplier_previous = 1.0;
-    chr.tint_alpha_multiplier = 1.0;
-    chr.tint_alpha_multiplier_modifier = 1.0;
-    chr.camouflage_transparency = 1.0;
-    chr.base_transparency = 1.0;
-    chr.base_transparency_modifier = 1.0;
-}
-
-fn restore_summon_hp(chr: &mut ChrIns) {
-    let data = chr.modules.as_mut().data.as_mut();
-    data.hp = data.max_hp.max(1);
-}
-
-fn park_summon(
-    world_chr_man: &mut WorldChrMan,
-    summon: &mut AttackSummonInstance,
-    settings: &AttackSummonSettings,
-) {
-    let Some(handle) = summon.handle else {
-        summon.active = false;
-        summon.pending_bind = false;
-        return;
-    };
-    let Some(chr) = chr_by_handle_mut(world_chr_man, handle) else {
-        summon.handle = None;
-        summon.active = false;
-        summon.pending_bind = false;
-        return;
-    };
-    let config = settings.summons[summon.config_index];
-
-    chr.remove_speffect(config.vanish_request_speffect(settings));
-    restore_summon_hp(chr);
-    chr.modules.as_mut().event.as_mut().request_animation_id = -1;
-    chr.chr_flags1c5.set_death_flag(false);
-    chr.chr_flags1c5.set_enable_render(false);
-    chr.chr_flags1c8.set_is_active(true);
-    chr.debug_flags.set_force_loaded(true);
-    chr.debug_flags.set_force_unloaded(false);
-    chr.debug_flags.set_character_disabled(false);
-    chr.debug_flags.set_disabled_updates(false);
-    chr.debug_flags.set_disabled_hit(true);
-    chr.debug_flags.set_disabled_movement(false);
-    chr.debug_flags.set_disabled_secondary_actions(false);
-    chr.base_transparency = 0.0;
-    chr.base_transparency_modifier = 0.0;
-    chr.tint_alpha_multiplier = 0.0;
-    chr.tint_alpha_multiplier_modifier = 0.0;
-    summon.active = false;
-    summon.pending_bind = false;
-}
-
-fn release_summon(world_chr_man: &mut WorldChrMan, summon: &AttackSummonInstance) {
-    let Some(handle) = summon.handle else {
-        return;
-    };
-    let Some(chr) = chr_by_handle_mut(world_chr_man, handle) else {
-        return;
-    };
-
-    let data = chr.modules.as_mut().data.as_mut();
-    data.hp = 0;
-    chr.chr_flags1c5.set_death_flag(true);
-    chr.chr_flags1c5.set_enable_render(false);
-    chr.chr_flags1c8.set_is_active(false);
-    chr.debug_flags.set_force_loaded(false);
-    chr.debug_flags.set_force_unloaded(true);
-    chr.debug_flags.set_character_disabled(true);
-    chr.debug_flags.set_disabled_updates(true);
-    chr.debug_flags.set_disabled_hit(true);
-    chr.debug_flags.set_disabled_movement(true);
-    chr.debug_flags.set_disabled_secondary_actions(true);
-    chr.base_transparency = 0.0;
-    chr.base_transparency_modifier = 0.0;
-    chr.tint_alpha_multiplier = 0.0;
-    chr.tint_alpha_multiplier_modifier = 0.0;
-}
-
-fn chr_dead_or_disabled(chr: &ChrIns) -> bool {
-    let data = chr.modules.as_ref().data.as_ref();
-    data.hp <= 0 || chr.chr_flags1c5.death_flag() || chr.debug_flags.character_disabled()
-}
-
-fn chr_has_speffect(chr: &ChrIns, sp_effect: i32) -> bool {
-    chr.special_effect
-        .entries()
-        .any(|entry| entry.param_id == sp_effect)
-}
-
-fn chr_by_handle_mut(
-    world_chr_man: &mut WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<&mut ChrIns> {
-    if let Some(mut chr_ptr) = world_chr_man.debug_chr_creator.last_created_chr {
-        let chr = unsafe { chr_ptr.as_mut() };
-        if chr.field_ins_handle == handle {
-            return Some(chr);
-        }
-    }
-
-    world_chr_man.chr_ins_by_handle_mut(&handle)
-}
-
 fn default_marker_speffect() -> i32 {
     14200128
 }
@@ -918,3 +446,140 @@ fn default_summons() -> Vec<AttackSummonConfig> {
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn original_defaults_and_per_slot_overrides_keep_all_summon_inputs() {
+        let s = AttackSummonSettings::default();
+        assert_eq!(s.summons.len(), 6);
+        assert_eq!(
+            s.summons
+                .iter()
+                .map(|v| v.trigger_speffect)
+                .collect::<Vec<_>>(),
+            (14200120..=14200125).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            s.summons.iter().map(|v| v.animation_id).collect::<Vec<_>>(),
+            vec![20010, 20011, 20012, 20013, 20017, 20018]
+        );
+        let v:AttackSummonConfig=toml::from_str("trigger_speffect=10\nnpc_param_id=20\nanimation_id=-1\nmarker_speffect=30\ngenerated_team_type=5\nfallback_lifetime_ms=0\nspawn_forward_distance=9.0\nspawn_height_offset=4.0\ndisable_lock_on=true\nis_player=true").unwrap();
+        assert_eq!(v.marker_speffect(&s), 30);
+        assert_eq!(v.generated_team_type(&s), 5);
+        assert_eq!(v.fallback_lifetime(&s), Duration::from_millis(1));
+        assert!(v.disable_lock_on(&s) && v.is_player);
+        assert_eq!(
+            summon_position([1., 2., 3., 0.], (0., 0., 1.), (1., 0., 0.), v, &s),
+            [1., 6., 12., 0.]
+        );
+    }
+    #[test]
+    fn cooldown_boundaries_and_horizontal_fallback_match_original_ordering() {
+        let s = AttackSummonSettings::default();
+        let t = Instant::now();
+        let mut c = Cooldowns::default();
+        assert!(c.accept(0, t, &s));
+        assert!(!c.accept(
+            1,
+            t + s.any_trigger_cooldown() - Duration::from_millis(1),
+            &s
+        ));
+        assert!(c.accept(1, t + s.any_trigger_cooldown(), &s));
+        assert!(!c.accept(
+            0,
+            t + s.same_trigger_cooldown() - Duration::from_millis(1),
+            &s
+        ));
+        assert!(c.accept(0, t + s.same_trigger_cooldown(), &s));
+        assert_eq!(
+            normalize_horizontal((0., 99., 0.), (0., 0., 1.)),
+            (0., 0., 1.)
+        );
+        assert_eq!(
+            normalize_horizontal((f32::NAN, 0., 1.), (1., 0., 0.)),
+            (1., 0., 0.)
+        );
+        assert_eq!(
+            normalize_horizontal((3., 9., 4.), (0., 0., 1.)),
+            (0.6, 0., 0.8)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_hud.rs"]
+mod hud_native_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_handles.rs"]
+mod hud_handle_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_tasks.rs"]
+mod hud_task_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_hooks.rs"]
+mod hud_hook_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../precision_runtime.rs"]
+mod hud_precision_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_camera.rs"]
+mod hud_camera_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_vitals.rs"]
+mod hud_vital_contracts;
+
+#[cfg(test)]
+use hud_vital_contracts as native_vitals;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_character.rs"]
+mod hud_character_contracts;
+
+#[cfg(test)]
+use presentation as character_runtime;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_world.rs"]
+mod hud_world_contracts;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_buddy.rs"]
+mod hud_buddy_contracts;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_bullets.rs"]
+mod hud_bullet_contracts;
+
+#[cfg(test)]
+use crate::creation as hud_creation_queue;
+// HUD-only entry points are compiled here until its main member finishes porting.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/native_creation.rs"]
+mod hud_creation_contracts;
+
+#[cfg(test)]
+use hud_handle_contracts as native_handles;
+#[cfg(test)]
+use hud_world_contracts as native_world;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../nightreign-style-hud/src/actors.rs"]
+mod hud_actor_contracts;

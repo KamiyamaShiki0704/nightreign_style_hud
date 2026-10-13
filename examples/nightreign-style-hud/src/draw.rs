@@ -1,3 +1,4 @@
+#[allow(clippy::too_many_arguments, reason = "Preserve the existing HUD renderer call contract")]
 fn draw_charge_slot(
     ui: &Ui,
     center: [f32; 2],
@@ -46,9 +47,7 @@ fn draw_charge_slot(
         ready,
         solid,
     );
-    if top_down_fill {
-        draw_bottom_fill(ui, center, radius - 3.0, layers[0], charge_fill_color(solid));
-    } else if !ready {
+    if top_down_fill || !ready {
         draw_bottom_fill(ui, center, radius - 3.0, layers[0], charge_fill_color(solid));
     } else if count.is_some() && layers[1] > 0.0 && layers[1] < 1.0 {
         draw_bottom_fill(
@@ -136,8 +135,8 @@ fn draw_recluse_skill_ui(
                 ImColor32::from_rgba(255, 255, 255, 165),
             );
         }
-        if let Some(element) = snapshot.recluse_elements[index] {
-            if let Some(texture_id) = icons.atlas {
+        if let Some(element) = snapshot.recluse_elements[index]
+            && let Some(texture_id) = icons.atlas {
                 let region = TextureRegion::atlas_slot(
                     texture_id,
                     RECLUSE_ATTRIBUTE_ATLAS_FIRST_SLOT + element.icon_index(),
@@ -151,7 +150,6 @@ fn draw_recluse_skill_ui(
                     ImColor32::from_rgba(255, 255, 255, 235),
                 );
             }
-        }
     }
 
     if let Some(element) = snapshot.recluse_lock_element {
@@ -179,7 +177,7 @@ fn draw_recluse_skill_ui(
 }
 
 fn draw_recluse_lock_debug_points(ui: &Ui, points: LockDebugPoints) {
-    let labels = ["A", "B", "C", "D", "E"];
+    let labels = ["D0/R", "D0/C", "UI/world", "Display", "Tag"];
     let colors = [
         ImColor32::from_rgba(255, 80, 80, 255),
         ImColor32::from_rgba(80, 180, 255, 255),
@@ -655,13 +653,10 @@ fn draw_revenant_game_settings_debug(x: f32, y: f32, font_size: f32) {
 
 fn revenant_game_settings_debug_lines() -> Option<[String; 3]> {
     const BYTES: usize = REVENANT_GAME_SETTINGS_DEBUG_BYTES;
-    let game_data_man = unsafe { GameDataMan::instance() }.ok()?;
-    let settings = game_data_man.game_settings.as_ref();
-    let ptr = settings as *const _ as *const u8;
-    let mut current = [0u8; BYTES];
-    unsafe {
-        std::ptr::copy_nonoverlapping(ptr, current.as_mut_ptr(), BYTES);
-    }
+    let copy = sdk_host::with_objects(|objects, epoch| objects.game_settings_prefix(epoch, BYTES))
+        .map_err(|error| eprintln!("ShikiFSRS HUD settings copy rejected: {error}"))
+        .ok()??;
+    let current: [u8; BYTES] = copy.bytes.try_into().ok()?;
 
     let mut baseline = REVENANT_GAME_SETTINGS_BASELINE.lock().ok()?;
     let baseline = baseline.get_or_insert(current);
@@ -685,7 +680,7 @@ fn revenant_game_settings_debug_lines() -> Option<[String; 3]> {
     let page0 = format_settings_bytes("000", &current[0x00..0x10]);
     let page1 = format_settings_bytes("0A0", &current[0xA0..0xB0]);
     Some([
-        format!("GameSettings hud_type:{hud_type} changed:{changed}"),
+        format!("GameSettings byte009:{hud_type} changed:{changed}"),
         page0,
         page1,
     ])
@@ -1157,8 +1152,8 @@ fn draw_scholar_target_marker(
         }
     }
 
-    if target.observed && progress >= 1.0 {
-        if let Some(texture_id) = icons.enemy_atlas {
+    if target.observed && progress >= 1.0
+        && let Some(texture_id) = icons.enemy_atlas {
             let (uv_min, uv_max) =
                 atlas_uv(SCHOLAR_ENEMY_FULL_ATLAS_SLOT, SCHOLAR_ENEMY_ATLAS_SLOTS);
             draw_centered_atlas_texture(
@@ -1171,7 +1166,6 @@ fn draw_scholar_target_marker(
                 ImColor32::from_rgba(255, 255, 255, 245),
             );
         }
-    }
 }
 
 fn scholar_marker_decay_colors(progress: f32) -> (ImColor32, ImColor32) {
@@ -1221,6 +1215,7 @@ fn lerp(start: f32, end: f32, t: f32) -> f32 {
     start + (end - start) * t.clamp(0.0, 1.0)
 }
 
+#[allow(clippy::too_many_arguments, reason = "Preserve the existing HUD renderer call contract")]
 fn draw_textured_progress_sector_atlas(
     ui: &Ui,
     center: [f32; 2],
@@ -1264,6 +1259,7 @@ fn draw_textured_progress_sector_atlas(
     }
 }
 
+#[allow(clippy::too_many_arguments, reason = "Preserve the existing HUD renderer call contract")]
 fn draw_rotated_atlas_texture(
     ui: &Ui,
     center: [f32; 2],
@@ -1540,6 +1536,7 @@ fn draw_ready_texture(
     .build();
 }
 
+#[allow(clippy::too_many_arguments, reason = "Preserve the existing HUD renderer call contract")]
 fn draw_active_texture(
     ui: &Ui,
     center: [f32; 2],

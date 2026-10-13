@@ -7,11 +7,16 @@ license.workspace = true
 publish = false
 
 [dependencies]
-eldenring.workspace = true
-fromsoftware-shared.workspace = true
+shikifsrs-elden-ring.workspace = true
+shikifsrs-runtime.workspace = true
+shikifsrs-overlay.workspace = true
 serde.workspace = true
 toml.workspace = true
 windows.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
+
+[dev-dependencies]
+ilhook = { version = "2.3.0", features = ["x64"] }
+tracing.workspace = true

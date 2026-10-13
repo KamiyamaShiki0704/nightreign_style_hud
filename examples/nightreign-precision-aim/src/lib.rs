@@ -3,26 +3,25 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
     sync::{
-        LazyLock, Mutex, Once,
-        atomic::{AtomicBool, AtomicIsize, Ordering},
+        Once,
+        atomic::{AtomicIsize, Ordering},
     },
     thread,
     time::Duration,
 };
 
-use eldenring::{
-    cs::{CSCamExt, CSCamera, CSTaskGroupIndex, CSTaskImp, CSWindowImp, GameMan, WorldChrMan},
-    fd4::FD4TaskData,
-    util::system::wait_for_system_init,
-};
-use fromsoftware_shared::{FromStatic, SharedTaskImpExt, program::Program};
+#[path = "../../../sdk_host.rs"]
+mod sdk_host;
+#[path = "../../../precision_runtime.rs"]
+mod sdk_precision;
 use hudhook::windows::Win32::Foundation::HINSTANCE;
 use hudhook::{
     ImguiRenderLoop, RenderContext,
-    hooks::dx12::ImguiDx12Hooks,
     imgui::{Context, ImColor32, TextureId, Ui},
 };
 use image::io::Reader as ImageReader;
+use shikifsrs_elden_ring::cameras::PerspectiveCameraObservation;
+use shikifsrs_overlay::hudhook;
 use windows::{
     Win32::{
         Foundation::HMODULE,
@@ -33,13 +32,6 @@ use windows::{
 
 static INSTALL_PRECISION_AIM_TASKS: Once = Once::new();
 static DLL_MODULE: AtomicIsize = AtomicIsize::new(0);
-static PRECISION_AIM_ACTIVE: AtomicBool = AtomicBool::new(false);
-static SUPPRESSED_PRECISION: AtomicBool = AtomicBool::new(false);
-static SUPPRESSED_HKS_PRECISION: AtomicBool = AtomicBool::new(false);
-static NORMAL_CAMERA_FOVS: LazyLock<Mutex<Option<CameraFovs>>> = LazyLock::new(|| Mutex::new(None));
-static NORMAL_GAME_CAMERA: LazyLock<Mutex<Option<GameCameraState>>> =
-    LazyLock::new(|| Mutex::new(None));
-
 const ACTIVATION_SPEFFECT: i32 = 883100;
 const VISUAL_FOV_SCALE: f32 = 1.22;
 const VISUAL_CAMERA_PULLBACK: f32 = 2.15;
@@ -69,7 +61,6 @@ pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void
         return 1;
     }
 
-    let hmodule_raw = hmodule.0 as isize;
     thread::spawn(move || {
         for _ in 0..FULL_HUD_DETECTION_POLLS {
             if full_hud_module_loaded() {
@@ -78,16 +69,9 @@ pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void
             thread::sleep(FULL_HUD_DETECTION_INTERVAL);
         }
 
-        let hmodule = HINSTANCE(hmodule_raw as *mut _);
-        let _ = debug::initialize::<ImguiDx12Hooks>(
-            hmodule,
-            DLL_PROCESS_ATTACH,
-            || {
-                wait_for_system_init(&Program::current(), Duration::MAX)
-                    .expect("Timeout waiting for system init");
-            },
-            PrecisionAimHud::default(),
-        );
+        if let Err(error) = sdk_host::start_overlay(|| Box::new(PrecisionAimHud::default())) {
+            tracing::error!(%error, "precision renderer startup failed");
+        }
     });
 
     1
@@ -96,23 +80,6 @@ pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void
 fn full_hud_module_loaded() -> bool {
     let _ = FULL_HUD_MODULE_NAME;
     unsafe { GetModuleHandleW(w!("nightreign_style_hud.dll")).is_ok() }
-}
-
-#[derive(Clone, Copy)]
-struct CameraFovs {
-    cs: [f32; 4],
-    chr: Option<[f32; 4]>,
-}
-
-#[derive(Clone, Copy)]
-struct GameCameraState {
-    zoom_target_dist_mult: f32,
-    override_lerp_factor: f32,
-    zoom_interpolated_progress: f32,
-    timed_override_duration: f32,
-    zoom_override_lerp_factor: f32,
-    zoom_reset_previous_distance: bool,
-    override_check_collisions: bool,
 }
 
 #[derive(Default)]
@@ -130,7 +97,7 @@ impl ImguiRenderLoop for PrecisionAimHud {
 
     fn render(&mut self, ui: &mut Ui) {
         self.update_scale();
-        if !PRECISION_AIM_ACTIVE.load(Ordering::Relaxed) {
+        if !sdk_precision::ACTIVE.load(Ordering::Relaxed) {
             return;
         }
         draw_precision_reticle(ui, self.reticles, self.scale);
@@ -139,517 +106,58 @@ impl ImguiRenderLoop for PrecisionAimHud {
 
 impl PrecisionAimHud {
     fn update_scale(&mut self) {
-        self.scale = unsafe { CSWindowImp::instance() }
-            .map(|window| (window.screen_width as f32 / 1920.0).clamp(0.65, 1.5))
-            .unwrap_or(1.0);
+        self.scale = sdk_host::with_objects(|objects, _| {
+            Ok(objects
+                .window()?
+                .map(|window| (window.configured_width as f32 / 1920.0).clamp(0.65, 1.5)))
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(1.0);
     }
 }
 
 fn install_precision_aim_tasks_once() {
     INSTALL_PRECISION_AIM_TASKS.call_once(|| {
-        let Ok(task_imp) = CSTaskImp::wait_for_instance(Duration::from_secs(30)) else {
-            return;
-        };
-
-        let pre_behavior = task_imp.run_recurring(
-            pre_behavior_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::ChrIns_PreBehavior,
-        );
-        let pre_camera = task_imp.run_recurring(
-            pre_camera_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::ChrIns_PreClothSafe,
-        );
-        let post_camera = task_imp.run_recurring(
-            post_camera_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::DrawParamUpdate,
-        );
-        let sound_step = task_imp.run_recurring(
-            precision_window_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::SoundStep,
-        );
-        let post_physics = task_imp.run_recurring(
-            precision_window_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::ChrIns_PostPhysics,
-        );
-        let pre_damage = task_imp.run_recurring(
-            precision_window_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::DmgMan_Pre,
-        );
-        let post_damage = task_imp.run_recurring(
-            post_damage_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::DmgMan_Post,
-        );
-        let post_scaleform = task_imp.run_recurring(
-            post_scaleform_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::ScaleformStep,
-        );
-        let draw_pre = task_imp.run_recurring(
-            draw_pre_task as fn(&FD4TaskData),
-            CSTaskGroupIndex::Draw_Pre,
-        );
-        std::mem::forget(pre_behavior);
-        std::mem::forget(pre_camera);
-        std::mem::forget(post_camera);
-        std::mem::forget(sound_step);
-        std::mem::forget(post_physics);
-        std::mem::forget(pre_damage);
-        std::mem::forget(post_damage);
-        std::mem::forget(post_scaleform);
-        std::mem::forget(draw_pre);
-    });
-}
-
-fn pre_behavior_task(_: &FD4TaskData) {
-    restore_precision_before_behavior();
-}
-
-fn pre_camera_task(_: &FD4TaskData) {
-    suppress_precision_before_camera();
-}
-
-fn post_camera_task(_: &FD4TaskData) {
-    update_precision_view_after_camera();
-}
-
-fn precision_window_task(_: &FD4TaskData) {
-    restore_precision_for_projectiles();
-}
-
-fn post_damage_task(_: &FD4TaskData) {
-    suppress_precision_before_menu();
-}
-
-fn post_scaleform_task(_: &FD4TaskData) {
-    finish_precision_frame_after_scaleform();
-}
-
-fn draw_pre_task(_: &FD4TaskData) {
-    restore_visual_camera_for_draw();
-}
-
-fn restore_precision_before_behavior() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        reset_precision_state();
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        reset_precision_state();
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        reset_precision_state();
-        player
-            .chr_ins
-            .chr_ctrl
-            .modifier
-            .data
-            .hks_flags
-            .set_disable_precision_shooting(false);
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    }
-
-    let manual_attack_aiming = player
-        .chr_ins
-        .modules
-        .action_flag
-        .action_modifiers_flags
-        .manual_attack_aiming();
-    let precision_shooting = player.chr_ins.chr_flags1c5.precision_shooting();
-    let aiming = manual_attack_aiming || precision_shooting;
-    PRECISION_AIM_ACTIVE.store(aiming, Ordering::Relaxed);
-    if !aiming {
-        SUPPRESSED_PRECISION.store(false, Ordering::Relaxed);
-        SUPPRESSED_HKS_PRECISION.store(false, Ordering::Relaxed);
-        player
-            .chr_ins
-            .chr_ctrl
-            .modifier
-            .data
-            .hks_flags
-            .set_disable_precision_shooting(false);
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    }
-
-    restore_normal_game_camera_state();
-    if manual_attack_aiming {
-        player.chr_ins.chr_flags1c5.set_precision_shooting(true);
-    }
-    player
-        .chr_ins
-        .chr_ctrl
-        .modifier
-        .data
-        .hks_flags
-        .set_disable_precision_shooting(false);
-}
-
-fn suppress_precision_before_camera() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        return;
-    }
-
-    let manual_attack_aiming = player
-        .chr_ins
-        .modules
-        .action_flag
-        .action_modifiers_flags
-        .manual_attack_aiming();
-    let precision_shooting = player.chr_ins.chr_flags1c5.precision_shooting();
-    let aiming = manual_attack_aiming || precision_shooting;
-    PRECISION_AIM_ACTIVE.store(aiming, Ordering::Relaxed);
-    if precision_shooting {
-        SUPPRESSED_PRECISION.store(true, Ordering::Relaxed);
-        player.chr_ins.chr_flags1c5.set_precision_shooting(false);
-    }
-}
-
-fn update_precision_view_after_camera() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        PRECISION_AIM_ACTIVE.store(false, Ordering::Relaxed);
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        PRECISION_AIM_ACTIVE.store(false, Ordering::Relaxed);
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        PRECISION_AIM_ACTIVE.store(false, Ordering::Relaxed);
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    }
-
-    let manual_attack_aiming = player
-        .chr_ins
-        .modules
-        .action_flag
-        .action_modifiers_flags
-        .manual_attack_aiming();
-    let precision_shooting = player.chr_ins.chr_flags1c5.precision_shooting();
-    let aiming =
-        manual_attack_aiming || precision_shooting || SUPPRESSED_PRECISION.load(Ordering::Relaxed);
-    PRECISION_AIM_ACTIVE.store(aiming, Ordering::Relaxed);
-    if !aiming {
-        remember_normal_camera_fov();
-        remember_normal_game_camera_state();
-        return;
-    }
-
-    restore_normal_game_camera_state();
-    restore_normal_camera_fov();
-    restore_normal_game_camera_state();
-    if manual_attack_aiming || SUPPRESSED_PRECISION.load(Ordering::Relaxed) {
-        player.chr_ins.chr_flags1c5.set_precision_shooting(true);
-    }
-    SUPPRESSED_HKS_PRECISION.store(true, Ordering::Relaxed);
-    player
-        .chr_ins
-        .chr_ctrl
-        .modifier
-        .data
-        .hks_flags
-        .set_disable_precision_shooting(true);
-}
-
-fn restore_precision_for_projectiles() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        return;
-    }
-    let manual_attack_aiming = player
-        .chr_ins
-        .modules
-        .action_flag
-        .action_modifiers_flags
-        .manual_attack_aiming();
-    if manual_attack_aiming || SUPPRESSED_PRECISION.load(Ordering::Relaxed) {
-        PRECISION_AIM_ACTIVE.store(true, Ordering::Relaxed);
-        player.chr_ins.chr_flags1c5.set_precision_shooting(true);
-    }
-}
-
-fn suppress_precision_before_menu() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        return;
-    }
-    let manual_attack_aiming = player
-        .chr_ins
-        .modules
-        .action_flag
-        .action_modifiers_flags
-        .manual_attack_aiming();
-    if manual_attack_aiming || player.chr_ins.chr_flags1c5.precision_shooting() {
-        PRECISION_AIM_ACTIVE.store(true, Ordering::Relaxed);
-        SUPPRESSED_PRECISION.store(true, Ordering::Relaxed);
-        player.chr_ins.chr_flags1c5.set_precision_shooting(false);
-    }
-}
-
-fn finish_precision_frame_after_scaleform() {
-    if !SUPPRESSED_PRECISION.swap(false, Ordering::Relaxed) {
-        return;
-    }
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        PRECISION_AIM_ACTIVE.store(false, Ordering::Relaxed);
-        return;
-    }
-    if SUPPRESSED_HKS_PRECISION.swap(false, Ordering::Relaxed) {
-        player
-            .chr_ins
-            .chr_ctrl
-            .modifier
-            .data
-            .hks_flags
-            .set_disable_precision_shooting(false);
-    }
-    let manual_attack_aiming = player
-        .chr_ins
-        .modules
-        .action_flag
-        .action_modifiers_flags
-        .manual_attack_aiming();
-    if manual_attack_aiming {
-        player.chr_ins.chr_flags1c5.set_precision_shooting(true);
-    }
-}
-
-fn restore_visual_camera_for_draw() {
-    if !PRECISION_AIM_ACTIVE.load(Ordering::Relaxed) {
-        return;
-    }
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance() }) else {
-        return;
-    };
-    let Some(player) = world_chr_man.main_player.as_ref() else {
-        return;
-    };
-    if !player_has_activation_speffect(player) {
-        return;
-    }
-    restore_normal_camera_fov();
-    restore_normal_game_camera_state();
-    adjust_final_display_camera();
-}
-
-fn reset_precision_state() {
-    PRECISION_AIM_ACTIVE.store(false, Ordering::Relaxed);
-    SUPPRESSED_PRECISION.store(false, Ordering::Relaxed);
-}
-
-fn player_has_activation_speffect(player: &eldenring::cs::PlayerIns) -> bool {
-    player
-        .chr_ins
-        .special_effect
-        .entries()
-        .any(|entry| entry.param_id == ACTIVATION_SPEFFECT)
-}
-
-fn remember_normal_camera_fov() {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
-        return;
-    };
-    let cs = [
-        camera.pers_cam_1.fov,
-        camera.pers_cam_2.fov,
-        camera.pers_cam_3.fov,
-        camera.pers_cam_4.fov,
-    ];
-    let chr = (unsafe { WorldChrMan::instance() })
-        .ok()
-        .and_then(|world_chr_man| {
-            let chr_cam = world_chr_man.chr_cam?;
-            let chr_cam = unsafe { chr_cam.as_ref() };
-            Some([
-                chr_cam.pers_cam.fov,
-                chr_cam.ex_follow_cam.fov,
-                chr_cam.aim_cam.fov,
-                chr_cam.dist_view_cam.fov,
-            ])
+        std::thread::spawn(|| {
+            let configuration = sdk_precision::configure(
+                sdk_precision::PrecisionSettings {
+                    fov_scale: VISUAL_FOV_SCALE,
+                    pullback: VISUAL_CAMERA_PULLBACK,
+                    right_offset: VISUAL_CAMERA_RIGHT_OFFSET,
+                },
+                |effects| sdk_precision::ActivationPolicy {
+                    enabled: effects.contains(&ACTIVATION_SPEFFECT),
+                    ..Default::default()
+                },
+            );
+            if let Err(error) = configuration.and_then(|_| sdk_precision::install()) {
+                tracing::error!(
+                    ?error,
+                    "precision task registration failed; partial outcomes retained"
+                );
+            }
         });
-    let valid_cs = cs
-        .iter()
-        .all(|fov| fov.is_finite() && *fov > 0.05 && *fov < 3.2);
-    let valid_chr = chr
-        .map(|fovs| {
-            fovs.iter()
-                .all(|fov| fov.is_finite() && *fov > 0.05 && *fov < 3.2)
-        })
-        .unwrap_or(true);
-    if valid_cs && valid_chr {
-        if let Ok(mut last) = NORMAL_CAMERA_FOVS.lock() {
-            *last = Some(CameraFovs { cs, chr });
-        }
-    }
-}
-
-fn restore_normal_camera_fov() {
-    let fovs = NORMAL_CAMERA_FOVS.lock().ok().and_then(|last| *last);
-    let Some(fovs) = fovs else {
-        return;
-    };
-    if let Ok(camera) = unsafe { CSCamera::instance_mut() } {
-        camera.pers_cam_1.fov = fovs.cs[0];
-        camera.pers_cam_2.fov = fovs.cs[1];
-        camera.pers_cam_3.fov = fovs.cs[2];
-        camera.pers_cam_4.fov = fovs.cs[3];
-    }
-    let Some(chr_fovs) = fovs.chr else {
-        return;
-    };
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        return;
-    };
-    let Some(mut chr_cam) = world_chr_man.chr_cam else {
-        return;
-    };
-    let chr_cam = unsafe { chr_cam.as_mut() };
-    let visual_fov = chr_fovs[1].max(0.05);
-    chr_cam.pers_cam.fov = visual_fov;
-    chr_cam.ex_follow_cam.fov = visual_fov;
-    chr_cam.aim_cam.fov = visual_fov;
-    chr_cam.dist_view_cam.fov = visual_fov;
-}
-
-fn adjust_final_display_camera() {
-    let Ok(camera) = (unsafe { CSCamera::instance_mut() }) else {
-        return;
-    };
-    let forward = camera.pers_cam_1.forward();
-    let right = camera.pers_cam_1.right();
-    let len = (forward.0 * forward.0 + forward.1 * forward.1 + forward.2 * forward.2).sqrt();
-    let right_len = (right.0 * right.0 + right.1 * right.1 + right.2 * right.2).sqrt();
-    if !len.is_finite() || len < 0.001 || !right_len.is_finite() || right_len < 0.001 {
-        return;
-    }
-    let dx =
-        forward.0 / len * VISUAL_CAMERA_PULLBACK + right.0 / right_len * VISUAL_CAMERA_RIGHT_OFFSET;
-    let dy =
-        forward.1 / len * VISUAL_CAMERA_PULLBACK + right.1 / right_len * VISUAL_CAMERA_RIGHT_OFFSET;
-    let dz =
-        forward.2 / len * VISUAL_CAMERA_PULLBACK + right.2 / right_len * VISUAL_CAMERA_RIGHT_OFFSET;
-    let apply = |cam: &mut eldenring::cs::CSPersCam| {
-        cam.fov = (cam.fov * VISUAL_FOV_SCALE).clamp(0.05, 3.0);
-        cam.matrix.3.0 -= dx;
-        cam.matrix.3.1 -= dy;
-        cam.matrix.3.2 -= dz;
-    };
-    apply(&mut camera.pers_cam_1);
-    apply(&mut camera.pers_cam_2);
-    apply(&mut camera.pers_cam_3);
-    apply(&mut camera.pers_cam_4);
+    });
 }
 
 fn reticle_screen_pos(viewport: [f32; 2]) -> [f32; 2] {
     let center = [viewport[0] * 0.5, viewport[1] * 0.5];
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+    let Some(camera) = sdk_precision::perspective().ok().flatten() else {
         return center;
     };
-    let cam = camera.pers_cam_1.as_ref();
-    let forward = cam.forward();
-    let right = cam.right();
-    let len = (forward.0 * forward.0 + forward.1 * forward.1 + forward.2 * forward.2).sqrt();
-    let right_len = (right.0 * right.0 + right.1 * right.1 + right.2 * right.2).sqrt();
-    if !len.is_finite() || len < 0.001 || !right_len.is_finite() || right_len < 0.001 {
+    let Some(delta) = sdk_precision::display_delta(camera) else {
         return center;
-    }
-
-    let fx = forward.0 / len;
-    let fy = forward.1 / len;
-    let fz = forward.2 / len;
-    let rx = right.0 / right_len;
-    let ry = right.1 / right_len;
-    let rz = right.2 / right_len;
-    let display_delta = [
-        fx * VISUAL_CAMERA_PULLBACK + rx * VISUAL_CAMERA_RIGHT_OFFSET,
-        fy * VISUAL_CAMERA_PULLBACK + ry * VISUAL_CAMERA_RIGHT_OFFSET,
-        fz * VISUAL_CAMERA_PULLBACK + rz * VISUAL_CAMERA_RIGHT_OFFSET,
-    ];
-    let matrix = cam.matrix;
-    let aim_point = fromsoftware_shared::F32Vector4(
-        matrix.3.0 + display_delta[0] + fx * RETICLE_CONVERGENCE_DISTANCE,
-        matrix.3.1 + display_delta[1] + fy * RETICLE_CONVERGENCE_DISTANCE,
-        matrix.3.2 + display_delta[2] + fz * RETICLE_CONVERGENCE_DISTANCE,
-        1.0,
-    );
-
-    project_position(aim_point, cam).unwrap_or(center)
-}
-
-fn remember_normal_game_camera_state() {
-    let Ok(game_man) = (unsafe { GameMan::instance() }) else {
-        return;
     };
-    let state = GameCameraState {
-        zoom_target_dist_mult: game_man.camera_zoom_target_dist_mult,
-        override_lerp_factor: game_man.cam_override_lerp_factor,
-        zoom_interpolated_progress: game_man.cam_zoom_interpolated_progress,
-        timed_override_duration: game_man.cam_timed_override_duration,
-        zoom_override_lerp_factor: game_man.cam_zoom_override_lerp_factor,
-        zoom_reset_previous_distance: game_man.cam_zoom_reset_previous_distance,
-        override_check_collisions: game_man.cam_override_check_collisions,
-    };
-    if state.zoom_target_dist_mult.is_finite()
-        && state.override_lerp_factor.is_finite()
-        && state.zoom_interpolated_progress.is_finite()
-        && state.timed_override_duration.is_finite()
-        && state.zoom_override_lerp_factor.is_finite()
-    {
-        if let Ok(mut last) = NORMAL_GAME_CAMERA.lock() {
-            *last = Some(state);
-        }
-    }
-}
-
-fn restore_normal_game_camera_state() {
-    let state = NORMAL_GAME_CAMERA.lock().ok().and_then(|last| *last);
-    let Some(state) = state else {
-        return;
-    };
-    let Ok(game_man) = (unsafe { GameMan::instance_mut() }) else {
-        return;
-    };
-    game_man.camera_zoom_target_dist_mult = state.zoom_target_dist_mult;
-    game_man.cam_override_lerp_factor = state.override_lerp_factor;
-    game_man.cam_zoom_interpolated_progress = state.zoom_interpolated_progress;
-    game_man.cam_timed_override_duration = state.timed_override_duration;
-    game_man.cam_zoom_override_lerp_factor = state.zoom_override_lerp_factor;
-    game_man.cam_zoom_reset_previous_distance = state.zoom_reset_previous_distance;
-    game_man.cam_override_check_collisions = state.override_check_collisions;
+    let forward: [f32; 3] =
+        std::array::from_fn(|index| f32::from_bits(camera.matrix_bits[2][index]));
+    let len = dot3(forward, forward).sqrt();
+    let aim_point = std::array::from_fn(|index| {
+        f32::from_bits(camera.matrix_bits[3][index])
+            + delta[index]
+            + forward[index] / len * RETICLE_CONVERGENCE_DISTANCE
+    });
+    project_position(aim_point, camera).unwrap_or(center)
 }
 
 fn draw_precision_reticle(ui: &Ui, reticles: [Option<TextureId>; 3], scale: f32) {
@@ -728,10 +236,10 @@ fn load_customizable_texture(
     for dir in external_asset_dirs() {
         for file_name in file_names {
             let path = dir.join(file_name);
-            if let Ok(bytes) = std::fs::read(&path) {
-                if let Some(texture) = load_texture_bytes(render_context, &bytes) {
-                    return Some(texture);
-                }
+            if let Ok(bytes) = std::fs::read(&path)
+                && let Some(texture) = load_texture_bytes(render_context, &bytes)
+            {
+                return Some(texture);
             }
         }
     }
@@ -771,27 +279,17 @@ fn load_texture_bytes(render_context: &mut dyn RenderContext, bytes: &[u8]) -> O
         .ok()
 }
 
-fn project_position(
-    position: fromsoftware_shared::F32Vector4,
-    camera: &eldenring::cs::CSPersCam,
-) -> Option<[f32; 2]> {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
-        return None;
-    };
-    let width = window.screen_width as f32;
-    let height = window.screen_height as f32;
-    if width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-
-    let matrix = camera.matrix;
-    let rel = [
-        position.0 - matrix.3.0,
-        position.1 - matrix.3.1,
-        position.2 - matrix.3.2,
-    ];
-
-    let fov = camera.fov;
+fn project_position(position: [f32; 3], camera: PerspectiveCameraObservation) -> Option<[f32; 2]> {
+    let extent = sdk_host::with_objects(|objects, _| {
+        objects.window()?.map(|v| v.configured_extent()).transpose()
+    })
+    .ok()
+    .flatten()?;
+    let width = extent.width as f32;
+    let height = extent.height as f32;
+    let matrix = camera.matrix_bits.map(|row| row.map(f32::from_bits));
+    let rel = std::array::from_fn(|index| position[index] - matrix[3][index]);
+    let fov = f32::from_bits(camera.frustum_bits[0]);
     if !fov.is_finite() || fov <= 0.0 {
         return None;
     }
@@ -804,16 +302,16 @@ fn project_position(
     if tan_half_fov.abs() < 0.001 {
         return None;
     }
-    let aspect = if camera.aspect_ratio.is_finite() && camera.aspect_ratio > 0.0 {
-        camera.aspect_ratio
+    let raw_aspect = f32::from_bits(camera.frustum_bits[1]);
+    let aspect = if raw_aspect.is_finite() && raw_aspect > 0.0 {
+        raw_aspect
     } else {
         width / height
     };
-
     let axes = (
-        [matrix.0.0, matrix.0.1, matrix.0.2],
-        [matrix.1.0, matrix.1.1, matrix.1.2],
-        [matrix.2.0, matrix.2.1, matrix.2.2],
+        std::array::from_fn(|i| matrix[0][i]),
+        std::array::from_fn(|i| matrix[1][i]),
+        std::array::from_fn(|i| matrix[2][i]),
     );
     project_with_camera_axes(rel, axes, width, height, aspect, tan_half_fov)
 }

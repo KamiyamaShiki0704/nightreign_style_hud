@@ -1,4 +1,4 @@
-static CAMERA_DIRECTED_LAST_POSITION: LazyLock<Mutex<Option<HavokPosition>>> =
+static CAMERA_DIRECTED_LAST_POSITION: LazyLock<Mutex<Option<HudPosition>>> =
     LazyLock::new(|| Mutex::new(None));
 
 #[derive(Clone, Copy)]
@@ -65,7 +65,7 @@ enum WylderHookshotNativeResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WylderSkillLockTargetKind {
-    Enemy(FieldInsHandle),
+    Enemy(HudHandle),
     Map,
 }
 
@@ -73,14 +73,14 @@ enum WylderSkillLockTargetKind {
 struct WylderSkillLockTarget {
     kind: WylderSkillLockTargetKind,
     screen_pos: [f32; 2],
-    world_pos: HavokPosition,
+    world_pos: HudPosition,
     distance: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum WylderHookshotMovementDestination {
-    Enemy(FieldInsHandle),
-    Point(HavokPosition),
+    Enemy(HudHandle),
+    Point(HudPosition),
 }
 
 impl WylderHookshotMovementDestination {
@@ -124,25 +124,19 @@ fn wylder_hookshot_capsule_from_values(
     })
 }
 
-fn wylder_hookshot_chr_capsule(chr: &ChrIns) -> Option<WylderHookshotCapsule> {
-    let physics = chr.modules.as_ref().physics.as_ref();
-    wylder_hookshot_capsule_from_values(
-        physics.chr_hit_height,
-        physics.chr_hit_radius,
-        physics.hit_height,
-        physics.hit_radius,
-    )
+fn wylder_hookshot_chr_capsule(chr: &HudActor) -> Option<WylderHookshotCapsule> {
+    let physics = native_character::physics(chr.identity.address).ok()?;
+    let [character, map] = physics.collision_dimensions();
+    wylder_hookshot_capsule_from_values(character[0], character[1], map[0], map[1])
 }
 
 fn wylder_hookshot_capsules_touch(
-    player_position: HavokPosition,
+    player_position: HudPosition,
     player_capsule: WylderHookshotCapsule,
-    target_position: HavokPosition,
+    target_position: HudPosition,
     target_capsule: WylderHookshotCapsule,
 ) -> bool {
-    if !havok_position_is_finite(&player_position)
-        || !havok_position_is_finite(&target_position)
-    {
+    if !havok_position_is_finite(&player_position) || !havok_position_is_finite(&target_position) {
         return false;
     }
 
@@ -158,8 +152,8 @@ fn wylder_hookshot_capsules_touch(
 
 fn wylder_hookshot_close_enough(
     destination: WylderHookshotMovementDestination,
-    player_position: HavokPosition,
-    target_position: HavokPosition,
+    player_position: HudPosition,
+    target_position: HudPosition,
     player_capsule: Option<WylderHookshotCapsule>,
     target_capsule: Option<WylderHookshotCapsule>,
 ) -> bool {
@@ -182,8 +176,8 @@ struct WylderHookshotMovementStopDetector {
     active: bool,
     destination: Option<WylderHookshotMovementDestination>,
     started_at: Option<Instant>,
-    start_position: Option<HavokPosition>,
-    previous_position: Option<HavokPosition>,
+    start_position: Option<HudPosition>,
+    previous_position: Option<HudPosition>,
     initial_distance: f32,
     closest_distance: f32,
     emitted: bool,
@@ -208,7 +202,7 @@ impl WylderHookshotMovementStopDetector {
     fn begin(
         &mut self,
         destination: Option<WylderHookshotMovementDestination>,
-        player_position: HavokPosition,
+        player_position: HudPosition,
         now: Instant,
     ) {
         *self = Self {
@@ -230,7 +224,7 @@ impl WylderHookshotMovementStopDetector {
     fn set_destination_if_missing(
         &mut self,
         destination: Option<WylderHookshotMovementDestination>,
-        player_position: HavokPosition,
+        player_position: HudPosition,
         now: Instant,
     ) {
         if self.destination.is_some() || destination.is_none() {
@@ -246,8 +240,8 @@ impl WylderHookshotMovementStopDetector {
 
     fn sample(
         &mut self,
-        player_position: HavokPosition,
-        target_position: Option<HavokPosition>,
+        player_position: HudPosition,
+        target_position: Option<HudPosition>,
         player_capsule: Option<WylderHookshotCapsule>,
         target_capsule: Option<WylderHookshotCapsule>,
         now: Instant,
@@ -283,8 +277,8 @@ impl WylderHookshotMovementStopDetector {
         });
         let approached = self.closest_distance
             <= self.initial_distance - WYLDER_HOOKSHOT_STOP_MIN_APPROACH_DISTANCE;
-        let rebounded = approached
-            && distance >= self.closest_distance + WYLDER_HOOKSHOT_STOP_REBOUND_DISTANCE;
+        let rebounded =
+            approached && distance >= self.closest_distance + WYLDER_HOOKSHOT_STOP_REBOUND_DISTANCE;
 
         self.closest_distance = self.closest_distance.min(distance);
         self.previous_position = Some(player_position);
@@ -302,9 +296,7 @@ impl WylderHookshotMovementStopDetector {
         );
         let passed_destination = travelled >= WYLDER_HOOKSHOT_STOP_MIN_TRAVEL_DISTANCE
             && (crossed_target_plane || rebounded);
-        if elapsed < WYLDER_HOOKSHOT_STOP_GRACE_SECONDS
-            || (!close_enough && !passed_destination)
-        {
+        if elapsed < WYLDER_HOOKSHOT_STOP_GRACE_SECONDS || (!close_enough && !passed_destination) {
             return false;
         }
 
@@ -372,17 +364,17 @@ struct ChargeState {
     recluse_lock_damage_module: Option<usize>,
     recluse_lock_pos: Option<[f32; 2]>,
     recluse_lock_debug_points: LockDebugPoints,
-    ironeye_weakness_marks: HashMap<FieldInsHandle, IroneyeWeaknessMark>,
+    ironeye_weakness_marks: HashMap<HudHandle, IroneyeWeaknessMark>,
     ironeye_weakness_bursts: Vec<IroneyeWeaknessBurst>,
-    scholar_targets: HashMap<FieldInsHandle, ScholarTargetState>,
+    scholar_targets: HashMap<HudHandle, ScholarTargetState>,
     scholar_observing: bool,
     scholar_debug: ScholarScanDebug,
-    scholar_sympathy_hp: HashMap<FieldInsHandle, i32>,
+    scholar_sympathy_hp: HashMap<HudHandle, i32>,
     scholar_damage_numbers: Vec<ScholarDamageNumber>,
-    scholar_native_damage_ignores: HashMap<FieldInsHandle, (i32, Instant)>,
-    scholar_enemy_effect_targets: Vec<FieldInsHandle>,
+    scholar_native_damage_ignores: HashMap<HudHandle, (i32, Instant)>,
+    scholar_enemy_effect_targets: Vec<HudHandle>,
     duchess_snapshots: HashMap<usize, DuchessReplaySnapshot>,
-    recluse_blood_brands: HashMap<FieldInsHandle, RecluseBloodBrand>,
+    recluse_blood_brands: HashMap<HudHandle, RecluseBloodBrand>,
     recluse_blood_pending_damage: Vec<RecluseBloodDamageEvent>,
     recluse_blood_debug: RecluseBloodDebug,
     recluse_blood_fixed_fp_accumulator: f32,
@@ -393,25 +385,25 @@ struct ChargeState {
     wylder_skill_lock_scale: f32,
     wylder_hookshot_aim_target: Option<WylderSkillLockTarget>,
     wylder_hookshot_native: WylderHookshotNativeResolver,
-    wylder_hookshot_target: Option<FieldInsHandle>,
+    wylder_hookshot_target: Option<HudHandle>,
     wylder_hookshot_movement_stop: WylderHookshotMovementStopDetector,
     revenant_skill_move_hud: bool,
     revenant_active_summon: Option<usize>,
     revenant_effect_mask: u8,
     revenant_summon_hp: [f32; REVENANT_SUMMON_COUNT],
-    revenant_summon_handles: [Option<FieldInsHandle>; REVENANT_SUMMON_COUNT],
+    revenant_summon_handles: [Option<HudHandle>; REVENANT_SUMMON_COUNT],
     revenant_summon_effect_seen: [bool; REVENANT_SUMMON_COUNT],
     revenant_summon_death_locked: [bool; REVENANT_SUMMON_COUNT],
     revenant_summon_restore_timer: [f32; REVENANT_SUMMON_COUNT],
     revenant_buddy_count: usize,
-    revenant_known_buddy_handles: Vec<FieldInsHandle>,
-    revenant_bind_baseline: Vec<FieldInsHandle>,
+    revenant_known_buddy_handles: Vec<HudHandle>,
+    revenant_bind_baseline: Vec<HudHandle>,
     revenant_pending_summon_bind: Option<usize>,
     revenant_map_refresh_cleanup_pending: bool,
     revenant_converted_souls: HashMap<u32, RevenantConvertedSoul>,
     revenant_debug_souls: Vec<RevenantDebugSoul>,
     revenant_pending_debug_soul: Option<RevenantPendingDebugSoul>,
-    revenant_seen_deaths: HashSet<FieldInsHandle>,
+    revenant_seen_deaths: HashSet<HudHandle>,
     resurrection_accumulation: ResurrectionAccumulationSnapshot,
     teammate_resurrection_accumulations: Vec<TeammateResurrectionAccumulationSnapshot>,
 }
@@ -433,16 +425,19 @@ struct DuchessReplaySnapshot {
 struct RevenantConvertedSoul {
     expires_at: Instant,
     buddy_param_id: u32,
-    handle: Option<FieldInsHandle>,
+    handle: Option<HudHandle>,
 }
 
 #[derive(Clone, Copy)]
 struct RevenantDebugSoul {
     expires_at: Instant,
     requested_at: Instant,
-    handle: Option<FieldInsHandle>,
-    creator_request_pending: bool,
+    handle: Option<HudHandle>,
+    creation_request: native_creation::RequestId,
+    // Retain creation provenance for unresolved native requests.
+    #[allow(dead_code)]
     npc_id: i32,
+    #[allow(dead_code)]
     npc_param_id: i32,
     hide_at: Option<Instant>,
 }
@@ -546,7 +541,8 @@ impl ChargeState {
         self.resurrection_accumulation = ResurrectionAccumulationSnapshot::default();
         self.teammate_resurrection_accumulations.clear();
 
-        let world_chr_man = unsafe { WorldChrMan::instance_mut() }.ok()?;
+        let mut copied_world = HudWorld::observe().ok()?;
+        let world_chr_man = &mut copied_world;
         self.finish_revenant_map_refresh_cleanup(world_chr_man);
         let (
             active_effects,
@@ -557,28 +553,33 @@ impl ChargeState {
             player_team_type,
             player_position,
         ) = {
-            let player = world_chr_man.main_player.as_mut()?;
+            let player = world_chr_man.player.as_mut()?;
             update_local_damage_module(player);
-            let active_effects = player
-                .chr_ins
-                .special_effect
-                .entries()
-                .map(|entry| entry.param_id)
-                .collect::<Vec<_>>();
-            let action_pressed = player.chr_ins.modules.action_request.action_requests.action();
-            let super_armor = player.chr_ins.modules.as_ref().super_armor.as_ref();
-            let super_armor_progress = normalized_super_armor(
-                super_armor.sa_durability,
-                super_armor.sa_durability_max,
-            );
+            let active_effects = native_character::effects(player.actor.identity.address)
+                .map_err(|error| eprintln!("ShikiFSRS HUD effects rejected: {error}"))
+                .ok()?;
+            let action_pressed = native_character::action_requested(player.actor.identity, 4)
+                .map_err(|error| eprintln!("ShikiFSRS HUD interaction request rejected: {error}"))
+                .ok()?;
+            // SAFETY: This actual callback owns the experimental full posture/game-data graph;
+            // native maximum querying is explicit and its actual receipt stays retained.
+            let super_armor_progress =
+                unsafe { native_vitals::super_armor_values(player.actor.identity.address) }
+                    .map_or_else(
+                        |error| {
+                            eprintln!("ShikiFSRS HUD local posture query rejected: {error}");
+                            0.0
+                        },
+                        |(current, maximum)| normalized_super_armor(current, maximum),
+                    );
             (
                 active_effects,
-                player.locked_on_enemy,
+                player.locked_target,
                 action_pressed,
                 super_armor_progress,
-                player.chr_ins.field_ins_handle,
-                player.chr_ins.team_type,
-                player.chr_ins.modules.as_ref().physics.as_ref().position,
+                player.actor.handle,
+                player.actor.team,
+                hud_physics_position(&player.actor),
             )
         };
         self.resurrection_accumulation = ResurrectionAccumulationSnapshot {
@@ -607,7 +608,7 @@ impl ChargeState {
         set_revenant_summon_range_hook_active(role == Some(Role::Revenant));
         if role != self.role {
             if let Some(old_role) = self.role {
-                let player = world_chr_man.main_player.as_mut()?;
+                let player = world_chr_man.player.as_mut()?;
                 remove_role_outputs(player, role_config(old_role));
                 if old_role == Role::Scholar {
                     self.clear_scholar_enemy_effects(world_chr_man, role_config(old_role));
@@ -630,7 +631,7 @@ impl ChargeState {
             self.duchess_snapshots.clear();
             self.ironeye_weakness_marks.clear();
             self.ironeye_weakness_bursts.clear();
-            let player = world_chr_man.main_player.as_mut()?;
+            let player = world_chr_man.player.as_mut()?;
             remove_all_role_outputs(player);
             remove_revenant_summon_death_effects_from_player(player);
             return None;
@@ -675,8 +676,8 @@ impl ChargeState {
             let revenant_buddy_handles = revenant_buddy_group_handles(world_chr_man);
             hide_revenant_native_summon_hud(&revenant_buddy_handles);
         }
-        let world_chr_man_ptr = world_chr_man as *mut WorldChrMan;
-        let player = world_chr_man.main_player.as_mut()?;
+        let mut copied_player = world_chr_man.player?;
+        let player = &mut copied_player;
         update_local_damage_module(player);
         self.log_damage_diagnostics(now);
         self.advance_skill(config, now, delta);
@@ -691,7 +692,7 @@ impl ChargeState {
             &active_effects,
             self.recluse_lock_element,
             self.recluse_lock_damage_module,
-            world_chr_man_ptr,
+            world_chr_man,
             now,
         );
         self.sync_output_speffects(player, config);
@@ -699,7 +700,7 @@ impl ChargeState {
             config.role == Role::Undertaker
                 && self.undertaker_buff_end.is_some()
                 && self.undertaker_buff_duration >= UNDERTAKER_ENHANCED_BUFF_SECONDS
-                && chr_has_speffect(&player.chr_ins, SP_UNDERTAKER_ENHANCED_SKILL_BUFF),
+                && chr_has_speffect(&player.actor, SP_UNDERTAKER_ENHANCED_SKILL_BUFF),
         );
 
         Some(self.snapshot(world_chr_man, config, action_pressed, now))
@@ -797,11 +798,11 @@ impl ChargeState {
         self.revenant_map_refresh_cleanup_pending = true;
     }
 
-    fn finish_revenant_map_refresh_cleanup(&mut self, world_chr_man: &mut WorldChrMan) {
+    fn finish_revenant_map_refresh_cleanup(&mut self, world_chr_man: &mut HudWorld) {
         if !self.revenant_map_refresh_cleanup_pending {
             return;
         }
-        let Some(player) = world_chr_man.main_player.as_mut() else {
+        let Some(player) = world_chr_man.player.as_mut() else {
             return;
         };
 
@@ -811,7 +812,7 @@ impl ChargeState {
 
     fn update_revenant_summons(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         role: Role,
         active_effects: &[i32],
         delta: f32,
@@ -858,8 +859,7 @@ impl ChargeState {
                     None
                 } else {
                     self.revenant_summon_handles[index] = None;
-                    self.revenant_summon_restore_timer[index] =
-                        REVENANT_SUMMON_HP_RESTORE_SECONDS;
+                    self.revenant_summon_restore_timer[index] = REVENANT_SUMMON_HP_RESTORE_SECONDS;
                     self.revenant_bind_baseline = self.revenant_known_buddy_handles.clone();
                     self.revenant_pending_summon_bind = Some(index);
                     Some(index)
@@ -878,21 +878,26 @@ impl ChargeState {
             let mut removed_by_system = false;
 
             if let Some(group_chr) =
-                revenant_buddy_group_by_param_id_mut(world_chr_man, REVENANT_BUDDY_PARAM_IDS[index])
+                revenant_buddy_group_by_param_id(world_chr_man, REVENANT_BUDDY_PARAM_IDS[index])
             {
-                if group_chr.disappear_requested && !should_restore_hp {
+                if group_chr.retirement_requested && !should_restore_hp {
                     removed_by_system = true;
                 } else {
                     if should_restore_hp {
-                        apply_revenant_buddy_hp_ratio(group_chr.chr, restore_hp_ratio);
+                        apply_revenant_buddy_hp_ratio_address(
+                            group_chr.character.address,
+                            restore_hp_ratio,
+                        );
                     }
                     hp_ratio = if should_restore_hp {
                         Some(restore_hp_ratio)
                     } else {
-                        revenant_buddy_hp_ratio(group_chr.chr)
+                        revenant_buddy_hp_ratio_identity(group_chr.character)
                     };
                     if hp_ratio.is_some() {
-                        self.revenant_summon_handles[index] = Some(group_chr.chr.field_ins_handle);
+                        self.revenant_summon_handles[index] = Some(HudHandle::from_native(
+                            group_chr.character.native_identifier,
+                        ));
                         self.revenant_pending_summon_bind = None;
                         self.revenant_bind_baseline.clear();
                     }
@@ -903,7 +908,7 @@ impl ChargeState {
                 hp_ratio = self.revenant_summon_handles[index].and_then(|handle| {
                     if should_restore_hp {
                         if let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
-                            apply_revenant_buddy_hp_ratio(chr, restore_hp_ratio);
+                            apply_revenant_buddy_hp_ratio_address(chr.address, restore_hp_ratio);
                         }
                         Some(restore_hp_ratio)
                     } else {
@@ -931,11 +936,10 @@ impl ChargeState {
                             &self.revenant_summon_handles,
                         )?
                     };
-                    if bind_was_pending {
-                        if let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
-                            apply_revenant_buddy_hp_ratio(chr, restore_hp_ratio);
+                    if bind_was_pending
+                        && let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
+                            apply_revenant_buddy_hp_ratio_address(chr.address, restore_hp_ratio);
                         }
-                    }
                     self.revenant_summon_handles[index] = Some(handle);
                     self.revenant_pending_summon_bind = None;
                     self.revenant_bind_baseline.clear();
@@ -982,12 +986,8 @@ impl ChargeState {
         let active_effect_index = self.revenant_active_summon.and_then(|index| {
             let hp_ratio = self.revenant_summon_handles[index]
                 .and_then(|handle| revenant_buddy_chr_by_handle(world_chr_man, handle))
-                .and_then(revenant_buddy_hp_ratio);
-            revenant_active_effect_index(
-                Some(index),
-                self.revenant_pending_summon_bind,
-                hp_ratio,
-            )
+                .and_then(revenant_buddy_hp_ratio_identity);
+            revenant_active_effect_index(Some(index), self.revenant_pending_summon_bind, hp_ratio)
         });
         sync_revenant_summon_active_effects(world_chr_man, active_effect_index);
         if self.revenant_pending_summon_bind.is_none() {
@@ -995,31 +995,35 @@ impl ChargeState {
         }
     }
 
-    fn sync_revenant_summon_death_effects(&mut self, world_chr_man: &mut WorldChrMan) {
-        let Some(player) = world_chr_man.main_player.as_mut() else {
+    fn sync_revenant_summon_death_effects(&mut self, world_chr_man: &mut HudWorld) {
+        let Some(player) = world_chr_man.player.as_mut() else {
             return;
         };
-        for index in 0..REVENANT_SUMMON_COUNT {
+        for (index, &effect) in REVENANT_SUMMON_DEATH_EFFECTS.iter().enumerate() {
             let hp_ratio = self.revenant_summon_hp[index].clamp(0.0, 1.0);
-            let effect = REVENANT_SUMMON_DEATH_EFFECTS[index];
             if hp_ratio <= 0.0 && !self.revenant_summon_death_locked[index] {
-                player.apply_speffect(effect, true);
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::apply_effect(player.actor.identity.address, effect, true)
+                    },
+                );
                 self.revenant_summon_death_locked[index] = true;
             } else if hp_ratio >= REVENANT_SUMMON_REVIVE_READY_HP_RATIO
                 && self.revenant_summon_death_locked[index]
             {
-                player.chr_ins.remove_speffect(effect);
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(player.actor.identity.address, effect)
+                    },
+                );
                 self.revenant_summon_death_locked[index] = false;
             }
         }
     }
 
-    fn update_revenant_passive(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        role: Role,
-        now: Instant,
-    ) {
+    fn update_revenant_passive(&mut self, world_chr_man: &mut HudWorld, role: Role, now: Instant) {
         if role != Role::Revenant {
             return;
         }
@@ -1039,32 +1043,29 @@ impl ChargeState {
         self.try_convert_revenant_kills(world_chr_man, now);
     }
 
-    fn update_revenant_converted_souls(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        now: Instant,
-    ) {
+    fn update_revenant_converted_souls(&mut self, world_chr_man: &mut HudWorld, now: Instant) {
         for soul in self.revenant_converted_souls.values_mut() {
             if soul.handle.is_none() {
                 if let Some(group_chr) =
-                    revenant_buddy_group_by_param_id_mut(world_chr_man, soul.buddy_param_id)
+                    revenant_buddy_group_by_param_id(world_chr_man, soul.buddy_param_id)
                 {
-                    prepare_revenant_passive_buddy(group_chr.chr);
-                    soul.handle = Some(group_chr.chr.field_ins_handle);
+                    prepare_revenant_passive_buddy(group_chr.character.address);
+                    soul.handle = Some(HudHandle::from_native(
+                        group_chr.character.native_identifier,
+                    ));
                 }
-            } else if let Some(handle) = soul.handle {
-                if let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
-                    prepare_revenant_passive_buddy(chr);
+            } else if let Some(handle) = soul.handle
+                && let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
+                    prepare_revenant_passive_buddy(chr.address);
                 }
-            }
         }
 
         let mut expired = Vec::new();
         for (buddy_param_id, soul) in &self.revenant_converted_souls {
             let should_remove = now >= soul.expires_at
-                || soul.handle.map_or(false, |handle| {
+                || soul.handle.is_some_and(|handle| {
                     revenant_buddy_chr_by_handle(world_chr_man, handle)
-                        .map_or(true, revenant_converted_soul_should_disappear)
+                        .is_some_and(revenant_converted_soul_identity_should_disappear)
                 });
             if should_remove {
                 expired.push(*buddy_param_id);
@@ -1078,19 +1079,39 @@ impl ChargeState {
         }
     }
 
-    fn try_convert_revenant_kills(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
+    fn try_convert_revenant_kills(&mut self, world_chr_man: &mut HudWorld, now: Instant) {
         let Some(player_handle) = world_chr_man
-            .main_player
+            .player
             .as_ref()
-            .map(|player| player.chr_ins.field_ins_handle)
+            .map(|player| player.actor.handle)
         else {
             return;
         };
 
         let mut candidates = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
-            let chr = unsafe { entry.chr_ins.as_ref() };
-            let handle = chr.field_ins_handle;
+        let entries = match native_world::update_entries(world_chr_man.object.address) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                return;
+            }
+        };
+        for entry in entries {
+            if let Err(error) = native_world::revalidate(entry.character) {
+                eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                return;
+            }
+            // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+            // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+            let copied = match HudActor::observe(entry.character) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                    return;
+                }
+            };
+            let chr = &copied;
+            let handle = chr.handle;
             if self.revenant_seen_deaths.contains(&handle) {
                 continue;
             }
@@ -1128,7 +1149,7 @@ impl ChargeState {
         }
     }
 
-    fn clear_revenant_converted_souls(&mut self, world_chr_man: &mut WorldChrMan) {
+    fn clear_revenant_converted_souls(&mut self, world_chr_man: &mut HudWorld) {
         for soul in self.revenant_converted_souls.values() {
             release_revenant_passive_soul(world_chr_man, soul);
         }
@@ -1140,48 +1161,48 @@ impl ChargeState {
         self.revenant_seen_deaths.clear();
     }
 
-    fn update_revenant_debug_souls(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
+    fn update_revenant_debug_souls(&mut self, world_chr_man: &mut HudWorld, now: Instant) {
+        let world_address = world_chr_man.object.address;
+        // SAFETY: Original update callback retains the complete exclusive creation graph/phase.
+        if let Err(error) = unsafe { native_creation::poll(world_address, now) } {
+            eprintln!(
+                "ShikiFSRS HUD creation progress failed or uncertain; ticket retained: {error}"
+            );
+            return;
+        }
         for soul in &mut self.revenant_debug_souls {
             if soul.hide_at.is_some() {
                 continue;
             }
             if soul.handle.is_none() {
-                if revenant_creator_request_consumed(
-                    soul.creator_request_pending,
-                    world_chr_man.debug_chr_creator.spawn,
-                ) {
-                    soul.creator_request_pending = false;
-                } else if soul.creator_request_pending {
-                    continue;
-                } else if world_chr_man.debug_chr_creator.spawn {
-                    continue;
-                }
-
-                if let Some(mut chr_ptr) = world_chr_man.debug_chr_creator.last_created_chr {
-                    let chr = unsafe { chr_ptr.as_mut() };
-                    if chr.npc_id == soul.npc_id && chr.npc_param_id == soul.npc_param_id {
-                        prepare_revenant_debug_soul(chr);
+                match native_creation::result(world_address, soul.creation_request) {
+                    Ok(Some(character)) => {
+                        prepare_revenant_debug_soul(character.address);
                         request_revenant_debug_soul_animation(
-                            chr,
+                            character.address,
                             REVENANT_CONVERTED_SOUL_APPEAR_ANIM_ID,
                         );
-                        soul.handle = Some(chr.field_ins_handle);
+                        soul.handle = Some(HudHandle::from_native(character.native_identifier));
+                    }
+                    Ok(None) => continue,
+                    Err(error) => {
+                        eprintln!("ShikiFSRS HUD attributed creation result rejected: {error}");
+                        return;
                     }
                 }
-            } else if let Some(handle) = soul.handle {
-                if let Some(chr) = revenant_debug_chr_by_handle_mut(world_chr_man, handle) {
-                    prepare_revenant_debug_soul(chr);
+            } else if let Some(handle) = soul.handle
+                && let Some(chr) = revenant_debug_chr_by_handle_mut(world_chr_man, handle) {
+                    prepare_revenant_debug_soul(chr.address);
                 }
-            }
         }
 
         let mut index = 0;
         while index < self.revenant_debug_souls.len() {
             let soul = self.revenant_debug_souls[index];
             if let Some(hide_at) = soul.hide_at {
-                let died_while_hiding = soul.handle.map_or(false, |handle| {
+                let died_while_hiding = soul.handle.is_some_and(|handle| {
                     revenant_debug_chr_by_handle(world_chr_man, handle)
-                        .map_or(true, revenant_converted_soul_should_disappear)
+                        .is_none_or(revenant_converted_soul_identity_should_disappear)
                 });
                 if died_while_hiding || now >= hide_at {
                     let soul = self.revenant_debug_souls.swap_remove(index);
@@ -1195,10 +1216,10 @@ impl ChargeState {
             let timed_out_unbound =
                 soul.handle.is_none() && now.duration_since(soul.requested_at).as_secs_f32() > 2.0;
             let expired_by_time = now >= soul.expires_at || timed_out_unbound;
-            let died_or_missing = soul.handle.map_or(false, |handle| {
-                    revenant_debug_chr_by_handle(world_chr_man, handle)
-                        .map_or(true, revenant_converted_soul_should_disappear)
-                });
+            let died_or_missing = soul.handle.is_some_and(|handle| {
+                revenant_debug_chr_by_handle(world_chr_man, handle)
+                    .is_none_or(revenant_converted_soul_identity_should_disappear)
+            });
             if died_or_missing {
                 let soul = self.revenant_debug_souls.swap_remove(index);
                 release_revenant_debug_soul(world_chr_man, &soul);
@@ -1206,7 +1227,7 @@ impl ChargeState {
                 if let Some(handle) = soul.handle {
                     if let Some(chr) = revenant_debug_chr_by_handle_mut(world_chr_man, handle) {
                         request_revenant_debug_soul_animation(
-                            chr,
+                            chr.address,
                             REVENANT_CONVERTED_SOUL_DISAPPEAR_ANIM_ID,
                         );
                     }
@@ -1224,11 +1245,7 @@ impl ChargeState {
         }
     }
 
-    fn submit_pending_revenant_debug_soul(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        now: Instant,
-    ) {
+    fn submit_pending_revenant_debug_soul(&mut self, world_chr_man: &mut HudWorld, now: Instant) {
         let Some(pending) = self.revenant_pending_debug_soul else {
             return;
         };
@@ -1236,8 +1253,16 @@ impl ChargeState {
             .revenant_debug_souls
             .iter()
             .any(|soul| soul.handle.is_none());
+        let world_address = world_chr_man.object.address;
+        let creator_busy = match native_creation::busy(world_address) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD creator observation rejected: {error}");
+                return;
+            }
+        };
         if !revenant_debug_spawn_submission_ready(
-            world_chr_man.debug_chr_creator.spawn,
+            creator_busy,
             has_unbound_request,
             now,
             pending.ready_at,
@@ -1251,23 +1276,44 @@ impl ChargeState {
         }
 
         let candidate = pending.candidate;
-        world_chr_man.spawn_debug_character(&ChrDebugSpawnRequest {
-            chr_id: candidate.npc_id,
-            chara_init_param_id: 0,
-            npc_param_id: candidate.npc_param_id,
-            npc_think_param_id: candidate.npc_think_param_id,
-            event_entity_id: 0,
-            talk_id: 0,
-            is_player: false,
-            pos_x: candidate.position.0,
-            pos_y: candidate.position.1,
-            pos_z: candidate.position.2,
-        });
+        // SAFETY: Preserve original ordinary enemy request in the exclusive creation callback.
+        // Enqueue returns the owned ID before progress can attempt any native operation.
+        let creation_request = match unsafe {
+            native_creation::submit(
+                world_address,
+                shikifsrs_elden_ring::creation_input_preparation::OrdinaryCreationInput {
+                    name_units: format!("c{:04}", candidate.npc_id).encode_utf16().collect(),
+                    position_bits: [
+                        candidate.position.0,
+                        candidate.position.1,
+                        candidate.position.2,
+                        candidate.position.3,
+                    ]
+                    .map(f32::to_bits),
+                    rotation_bits: [0; 4],
+                    chara_init_param_id: 0,
+                    npc_param_id: candidate.npc_param_id,
+                    npc_think_param_id: candidate.npc_think_param_id,
+                    event_entity_id: 0,
+                    talk_id: 0,
+                    animation_id: -1,
+                    route:
+                        shikifsrs_elden_ring::debug_creation_fields::OrdinaryCreationRoute::Enemy,
+                },
+                now,
+            )
+        } {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD creation enqueue rejected: {error}");
+                return;
+            }
+        };
         self.revenant_debug_souls.push(RevenantDebugSoul {
             expires_at: now + Duration::from_secs_f32(REVENANT_CONVERTED_SOUL_SECONDS),
             requested_at: now,
             handle: None,
-            creator_request_pending: true,
+            creation_request,
             npc_id: candidate.npc_id,
             npc_param_id: candidate.npc_param_id,
             hide_at: None,
@@ -1275,11 +1321,11 @@ impl ChargeState {
         self.revenant_pending_debug_soul = None;
     }
 
-    fn try_queue_revenant_debug_kill(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
+    fn try_queue_revenant_debug_kill(&mut self, world_chr_man: &mut HudWorld, now: Instant) {
         let Some(player_handle) = world_chr_man
-            .main_player
+            .player
             .as_ref()
-            .map(|player| player.chr_ins.field_ins_handle)
+            .map(|player| player.actor.handle)
         else {
             return;
         };
@@ -1291,9 +1337,29 @@ impl ChargeState {
         }
 
         let mut candidates = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
-            let chr = unsafe { entry.chr_ins.as_ref() };
-            let handle = chr.field_ins_handle;
+        let entries = match native_world::update_entries(world_chr_man.object.address) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                return;
+            }
+        };
+        for entry in entries {
+            if let Err(error) = native_world::revalidate(entry.character) {
+                eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                return;
+            }
+            // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+            // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+            let copied = match HudActor::observe(entry.character) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                    return;
+                }
+            };
+            let chr = &copied;
+            let handle = chr.handle;
             if self.revenant_seen_deaths.contains(&handle) {
                 continue;
             }
@@ -1321,7 +1387,10 @@ impl ChargeState {
 
     fn begin_undertaker_skill(&mut self, enhanced: bool, now: Instant) -> i32 {
         let (duration, effect) = if enhanced {
-            (UNDERTAKER_ENHANCED_BUFF_SECONDS, SP_UNDERTAKER_ENHANCED_SKILL_BUFF)
+            (
+                UNDERTAKER_ENHANCED_BUFF_SECONDS,
+                SP_UNDERTAKER_ENHANCED_SKILL_BUFF,
+            )
         } else {
             (UNDERTAKER_BUFF_SECONDS, SP_UNDERTAKER_NORMAL_SKILL_BUFF)
         };
@@ -1368,17 +1437,16 @@ impl ChargeState {
     }
 
     fn advance_ultimate(&mut self, config: &RoleConfig, now: Instant, delta: f32) {
-        if config.role == Role::Undertaker {
-            if self
+        if config.role == Role::Undertaker
+            && self
                 .undertaker_free_ultimate_end
                 .is_some_and(|end| (end - now).as_secs_f32() <= 0.0)
             {
                 self.undertaker_free_ultimate_end = None;
             }
-        }
 
-        if config.role == Role::Executor {
-            if let Some(end) = self.executor_transform_end {
+        if config.role == Role::Executor
+            && let Some(end) = self.executor_transform_end {
                 let remaining = (end - now).as_secs_f32();
                 if remaining <= 0.0 {
                     self.executor_transform_end = None;
@@ -1389,30 +1457,39 @@ impl ChargeState {
                 }
                 return;
             }
-        }
 
         self.ultimate = (self.ultimate + delta / config.ultimate_cooldown).clamp(0.0, 1.0);
     }
 
-    fn apply_pending_undertaker_events(
-        &mut self,
-        player: &mut eldenring::cs::PlayerIns,
-        config: &RoleConfig,
-    ) {
+    fn apply_pending_undertaker_events(&mut self, player: &mut HudPlayer, config: &RoleConfig) {
         if config.role == Role::Undertaker && self.undertaker_auto_end_pending {
             clear_undertaker_skill_effects(player);
-            player.apply_speffect(config.effect(SP_UNDERTAKER_SKILL_AUTO_END), true);
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        player.actor.identity.address,
+                        config.effect(SP_UNDERTAKER_SKILL_AUTO_END),
+                        true,
+                    )
+                },
+            );
             self.undertaker_auto_end_pending = false;
         }
     }
 
-    fn apply_pending_executor_events(
-        &mut self,
-        player: &mut eldenring::cs::PlayerIns,
-        config: &RoleConfig,
-    ) {
+    fn apply_pending_executor_events(&mut self, player: &mut HudPlayer, config: &RoleConfig) {
         if config.role == Role::Executor && self.executor_auto_end_pending {
-            player.apply_speffect(config.effect(SP_EXECUTOR_ULTIMATE_AUTO_END), true);
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        player.actor.identity.address,
+                        config.effect(SP_EXECUTOR_ULTIMATE_AUTO_END),
+                        true,
+                    )
+                },
+            );
             self.executor_auto_end_pending = false;
         }
     }
@@ -1453,7 +1530,7 @@ impl ChargeState {
 
     fn update_scholar_targets(
         &mut self,
-        world_chr_man: &WorldChrMan,
+        world_chr_man: &HudWorld,
         role: Role,
         active_effects: &[i32],
         delta: f32,
@@ -1466,22 +1543,36 @@ impl ChargeState {
         self.scholar_debug = ScholarScanDebug::default();
 
         if self.scholar_observing {
-            let Some(player) = world_chr_man.main_player.as_ref() else {
+            let Some(player) = world_chr_man.player else {
                 self.decay_scholar_targets(world_chr_man, delta);
                 return;
             };
-            let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
+            let player_pos = hud_physics_position(&player.actor);
 
-            let mut debug_candidate_score = f32::MAX;
-            let mut scanned = 0usize;
-            for entry in world_chr_man.chr_inses_by_distance.iter() {
-                if scanned >= SCHOLAR_SCAN_MAX_DISTANCE_ENTRIES {
-                    break;
+            let entries = match native_world::update_entries(world_chr_man.object.address) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                    return;
                 }
-                scanned += 1;
+            };
+            for entry in entries.into_iter().take(SCHOLAR_SCAN_MAX_DISTANCE_ENTRIES) {
                 self.scholar_debug.scanned += 1;
 
-                let chr = unsafe { entry.chr_ins.as_ref() };
+                if let Err(error) = native_world::revalidate(entry.character) {
+                    eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                    return;
+                }
+                // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+                // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+                let copied = match HudActor::observe(entry.character) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                        return;
+                    }
+                };
+                let chr = &copied;
                 if let Some(reason) = scholar_reject_reason(chr) {
                     match reason {
                         ScholarRejectReason::Type => self.scholar_debug.type_skip += 1,
@@ -1501,7 +1592,7 @@ impl ChargeState {
 
                 let target_pos = scholar_chr_physics_position(chr);
                 let target_distance = distance_havok(player_pos, target_pos);
-                if !scholar_in_lock_target_volume(player.as_ref(), target_pos, target_distance) {
+                if !scholar_in_lock_target_volume(&player, target_pos, target_distance) {
                     self.scholar_debug.range_skip += 1;
                     continue;
                 }
@@ -1510,26 +1601,16 @@ impl ChargeState {
                     self.scholar_debug.range_skip += 1;
                     continue;
                 }
-                if let Some(score) = scholar_screen_pos_lens_score(screen_pos) {
-                    if score < debug_candidate_score {
-                        debug_candidate_score = score;
-                        self.scholar_debug.candidate =
-                            scholar_candidate_debug(chr, target_distance, player.as_ref());
-                    }
-                }
-                if !scholar_has_line_of_sight(chr, player.as_ref()) {
+                if !scholar_has_line_of_sight(chr, &player) {
                     self.scholar_debug.los_skip += 1;
                     continue;
                 }
                 let gain = scan_gain * delta;
-                let target = self
-                    .scholar_targets
-                    .entry(chr.field_ins_handle)
-                    .or_default();
+                let target = self.scholar_targets.entry(chr.handle).or_default();
                 target.progress = (target.progress + gain).clamp(0.0, 1.0);
                 target.pos = screen_pos;
                 target.visible = true;
-                target.handle = Some(chr.field_ins_handle);
+                target.handle = Some(chr.handle);
                 self.scholar_debug.accepted += 1;
             }
         }
@@ -1537,19 +1618,19 @@ impl ChargeState {
         self.decay_scholar_targets(world_chr_man, delta);
     }
 
-    fn decay_scholar_targets(&mut self, world_chr_man: &WorldChrMan, delta: f32) {
+    fn decay_scholar_targets(&mut self, world_chr_man: &HudWorld, delta: f32) {
         let mut expired = Vec::new();
         for (handle, target) in self.scholar_targets.iter_mut() {
             if !target.visible {
-                let Some(chr) = world_chr_man.chr_ins_by_handle(handle) else {
+                let Some(chr) = hud_actor_by_handle(world_chr_man, handle) else {
                     expired.push(*handle);
                     continue;
                 };
-                if scholar_reject_reason(chr).is_some() {
+                if scholar_reject_reason(&chr).is_some() {
                     expired.push(*handle);
                     continue;
                 }
-                let Some(screen_pos) = scholar_target_screen_pos(chr) else {
+                let Some(screen_pos) = scholar_target_screen_pos(&chr) else {
                     expired.push(*handle);
                     continue;
                 };
@@ -1570,7 +1651,7 @@ impl ChargeState {
 
     fn update_wylder_skill_lock(
         &mut self,
-        world_chr_man: &WorldChrMan,
+        world_chr_man: &HudWorld,
         role: Role,
         active_effects: &[i32],
     ) {
@@ -1592,7 +1673,7 @@ impl ChargeState {
 
     fn update_wylder_hookshot_native_resolution(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         active_effects: &[i32],
     ) {
         let active = active_effects.contains(&SP_WYLDER_HOOKSHOT_RESOLVE_ACTIVE);
@@ -1619,9 +1700,25 @@ impl ChargeState {
 
         if let Some((handle, _)) = enemy {
             self.wylder_hookshot_target = Some(handle);
-            if let Some(target) = world_chr_man.chr_ins_by_handle_mut(&handle) {
-                target.remove_speffect(SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED);
-                target.remove_speffect(SP_WYLDER_HOOKSHOT_IMPACT_REJECTED);
+            if let Some(target) = hud_actor_by_handle(world_chr_man, &handle) {
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(
+                            target.identity.address,
+                            SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED,
+                        )
+                    },
+                );
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(
+                            target.identity.address,
+                            SP_WYLDER_HOOKSHOT_IMPACT_REJECTED,
+                        )
+                    },
+                );
             }
         }
 
@@ -1629,32 +1726,40 @@ impl ChargeState {
             return;
         };
         clear_wylder_hookshot_player_outputs(world_chr_man);
-        let Some(player) = world_chr_man.main_player.as_mut() else {
+        let Some(player) = world_chr_man.player.as_mut() else {
             return;
         };
         let output = match result {
             WylderHookshotNativeResult::PullEnemy => SP_WYLDER_HOOKSHOT_PULL_ENEMY,
             WylderHookshotNativeResult::PullToEnemy => SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY,
         };
-        player.apply_speffect(output, true);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::apply_effect(player.actor.identity.address, output, true) },
+        );
     }
 
     fn update_wylder_hookshot_movement_stop(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         active_effects: &[i32],
         wylder_active: bool,
         now: Instant,
     ) {
-        let active = wylder_active
-            && active_effects.contains(&SP_WYLDER_HOOKSHOT_MOVEMENT_ACTIVE);
+        let active = wylder_active && active_effects.contains(&SP_WYLDER_HOOKSHOT_MOVEMENT_ACTIVE);
         if !active {
             let was_active = self.wylder_hookshot_movement_stop.active;
             self.wylder_hookshot_movement_stop.reset();
-            if let Some(player) = world_chr_man.main_player.as_mut() {
-                player
-                    .chr_ins
-                    .remove_speffect(SP_WYLDER_HOOKSHOT_MOVEMENT_STOP);
+            if let Some(player) = world_chr_man.player.as_mut() {
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(
+                            player.actor.identity.address,
+                            SP_WYLDER_HOOKSHOT_MOVEMENT_STOP,
+                        )
+                    },
+                );
             }
             if was_active {
                 self.wylder_hookshot_target = None;
@@ -1663,16 +1768,12 @@ impl ChargeState {
             return;
         }
 
-        let Some((player_position, player_capsule)) = world_chr_man
-            .main_player
-            .as_ref()
-            .map(|player| {
-                (
-                    scholar_chr_physics_position(&player.chr_ins),
-                    wylder_hookshot_chr_capsule(&player.chr_ins),
-                )
-            })
-        else {
+        let Some((player_position, player_capsule)) = world_chr_man.player.map(|player| {
+            (
+                scholar_chr_physics_position(&player.actor),
+                wylder_hookshot_chr_capsule(&player.actor),
+            )
+        }) else {
             self.wylder_hookshot_movement_stop.reset();
             return;
         };
@@ -1680,41 +1781,48 @@ impl ChargeState {
         if !self.wylder_hookshot_movement_stop.active {
             self.wylder_hookshot_movement_stop
                 .begin(candidate, player_position, now);
-            if let Some(player) = world_chr_man.main_player.as_mut() {
-                player
-                    .chr_ins
-                    .remove_speffect(SP_WYLDER_HOOKSHOT_MOVEMENT_STOP);
+            if let Some(player) = world_chr_man.player.as_mut() {
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(
+                            player.actor.identity.address,
+                            SP_WYLDER_HOOKSHOT_MOVEMENT_STOP,
+                        )
+                    },
+                );
             }
         } else {
-            self.wylder_hookshot_movement_stop.set_destination_if_missing(
-                candidate,
-                player_position,
-                now,
-            );
+            self.wylder_hookshot_movement_stop
+                .set_destination_if_missing(candidate, player_position, now);
         }
 
         let target = self
             .wylder_hookshot_movement_stop
             .destination
-            .and_then(|destination| {
-                wylder_hookshot_destination_sample(world_chr_man, destination)
-            });
+            .and_then(|destination| wylder_hookshot_destination_sample(world_chr_man, destination));
         let target_position = target.map(|(position, _)| position);
         let target_capsule = target.and_then(|(_, capsule)| capsule);
-        if !self
-            .wylder_hookshot_movement_stop
-            .sample(
-                player_position,
-                target_position,
-                player_capsule,
-                target_capsule,
-                now,
-            )
-        {
+        if !self.wylder_hookshot_movement_stop.sample(
+            player_position,
+            target_position,
+            player_capsule,
+            target_capsule,
+            now,
+        ) {
             return;
         }
-        if let Some(player) = world_chr_man.main_player.as_mut() {
-            player.apply_speffect(SP_WYLDER_HOOKSHOT_MOVEMENT_STOP, true);
+        if let Some(player) = world_chr_man.player.as_mut() {
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        player.actor.identity.address,
+                        SP_WYLDER_HOOKSHOT_MOVEMENT_STOP,
+                        true,
+                    )
+                },
+            );
         }
     }
 
@@ -1748,7 +1856,7 @@ impl ChargeState {
 
     fn update_ironeye_weakness(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         role: Role,
         now: Instant,
         damage_events: &[DamageHookEvent],
@@ -1760,8 +1868,9 @@ impl ChargeState {
             return;
         }
 
-        self.ironeye_weakness_bursts
-            .retain(|burst| (now - burst.created_at).as_secs_f32() < IRONEYE_WEAKNESS_BURST_SECONDS);
+        self.ironeye_weakness_bursts.retain(|burst| {
+            (now - burst.created_at).as_secs_f32() < IRONEYE_WEAKNESS_BURST_SECONDS
+        });
         self.expire_ironeye_weakness_marks(world_chr_man, config, now);
         self.refresh_ironeye_weakness_marks(world_chr_man, config, now);
         self.accumulate_ironeye_weakness_damage(world_chr_man, config, now, damage_events);
@@ -1769,36 +1878,74 @@ impl ChargeState {
 
     fn refresh_ironeye_weakness_marks(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         config: &RoleConfig,
         now: Instant,
     ) {
         let trigger = config.effect(SP_IRONEYE_WEAKNESS_TRIGGER);
         let mut handles = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
-            let chr = unsafe { entry.chr_ins.as_ref() };
+        let entries = match native_world::update_entries(world_chr_man.object.address) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                return;
+            }
+        };
+        for entry in entries {
+            if let Err(error) = native_world::revalidate(entry.character) {
+                eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                return;
+            }
+            // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+            // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+            let copied = match HudActor::observe(entry.character) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                    return;
+                }
+            };
+            let chr = &copied;
             if scholar_reject_reason(chr).is_some() || !chr_has_speffect(chr, trigger) {
                 continue;
             }
-            handles.push(chr.field_ins_handle);
+            handles.push(chr.handle);
         }
 
         for handle in handles {
-            let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) else {
+            let Some(enemy) = hud_actor_by_handle(world_chr_man, &handle) else {
                 continue;
             };
-            enemy.remove_speffect(trigger);
-            if scholar_reject_reason(enemy).is_some() {
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe { native_character::remove_effect(enemy.identity.address, trigger) },
+            );
+            if scholar_reject_reason(&enemy).is_some() {
                 continue;
             }
-            let data = enemy.modules.as_ref().data.as_ref();
-            let damage_module = damage_module_from_chr_ins(enemy);
-            if damage_module == 0 || data.max_hp <= 0 {
+            let data = match native_vitals::observe(enemy.identity.address) {
+                Ok(value) => value.hp,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD weakness vital copy rejected: {error}");
+                    continue;
+                }
+            };
+            let damage_module = damage_module_from_chr_ins(&enemy);
+            if damage_module == 0 || data.maximum <= 0 {
                 continue;
             }
             let threshold_damage =
-                ((data.max_hp as f32) * IRONEYE_WEAKNESS_THRESHOLD_MAX_HP_RATE).ceil() as i32;
-            enemy.apply_speffect(config.effect(SP_IRONEYE_WEAKNESS_ACTIVE), true);
+                ((data.maximum as f32) * IRONEYE_WEAKNESS_THRESHOLD_MAX_HP_RATE).ceil() as i32;
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        enemy.identity.address,
+                        config.effect(SP_IRONEYE_WEAKNESS_ACTIVE),
+                        true,
+                    )
+                },
+            );
             self.ironeye_weakness_marks
                 .entry(handle)
                 .and_modify(|mark| {
@@ -1818,7 +1965,7 @@ impl ChargeState {
 
     fn accumulate_ironeye_weakness_damage(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         config: &RoleConfig,
         now: Instant,
         events: &[DamageHookEvent],
@@ -1844,7 +1991,7 @@ impl ChargeState {
             }
         }
 
-        broken.sort_by_key(|handle| (handle.selector.container(), handle.selector.index()));
+        broken.sort_by_key(|handle| (handle.diagnostic_set_index(), handle.diagnostic_ordinal()));
         broken.dedup();
         for handle in broken {
             self.break_ironeye_weakness_mark(world_chr_man, config, handle);
@@ -1853,21 +2000,37 @@ impl ChargeState {
 
     fn break_ironeye_weakness_mark(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         config: &RoleConfig,
-        handle: FieldInsHandle,
+        handle: HudHandle,
     ) {
         if self.ironeye_weakness_marks.remove(&handle).is_none() {
             return;
         }
-        let burst_pos = world_chr_man.main_player.as_ref().and_then(|player| {
-            world_chr_man
-                .chr_ins_by_handle(&handle)
-                .and_then(|target| ironeye_weakness_marker_screen_pos(player, target))
+        let burst_pos = world_chr_man.player.and_then(|player| {
+            hud_actor_by_handle(world_chr_man, &handle)
+                .and_then(|target| ironeye_weakness_marker_screen_pos(&player, &target))
         });
-        if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
-            enemy.remove_speffect(config.effect(SP_IRONEYE_WEAKNESS_ACTIVE));
-            enemy.apply_speffect(config.effect(SP_IRONEYE_WEAKNESS_BREAK), true);
+        if let Some(enemy) = hud_actor_by_handle(world_chr_man, &handle) {
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::remove_effect(
+                        enemy.identity.address,
+                        config.effect(SP_IRONEYE_WEAKNESS_ACTIVE),
+                    )
+                },
+            );
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        enemy.identity.address,
+                        config.effect(SP_IRONEYE_WEAKNESS_BREAK),
+                        true,
+                    )
+                },
+            );
         }
         if let Some(pos) = burst_pos {
             if self.ironeye_weakness_bursts.len() >= IRONEYE_WEAKNESS_MAX_BURSTS {
@@ -1882,42 +2045,57 @@ impl ChargeState {
 
     fn expire_ironeye_weakness_marks(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         config: &RoleConfig,
         now: Instant,
     ) {
         let mut expired = Vec::new();
         for (&handle, mark) in self.ironeye_weakness_marks.iter() {
-            let invalid = world_chr_man
-                .chr_ins_by_handle(&handle)
-                .map_or(true, |enemy| scholar_reject_reason(enemy).is_some());
+            let invalid = hud_actor_by_handle(world_chr_man, &handle)
+                .is_none_or(|enemy| scholar_reject_reason(&enemy).is_some());
             if now >= mark.expires_at || invalid {
                 expired.push(handle);
             }
         }
         for handle in expired {
             self.ironeye_weakness_marks.remove(&handle);
-            if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
-                enemy.remove_speffect(config.effect(SP_IRONEYE_WEAKNESS_ACTIVE));
+            if let Some(enemy) = hud_actor_by_handle(world_chr_man, &handle) {
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(
+                            enemy.identity.address,
+                            config.effect(SP_IRONEYE_WEAKNESS_ACTIVE),
+                        )
+                    },
+                );
             }
         }
     }
 
-    fn clear_ironeye_weakness_marks(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        config: &RoleConfig,
-    ) {
-        for handle in self.ironeye_weakness_marks.drain().map(|(handle, _)| handle) {
-            if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
-                enemy.remove_speffect(config.effect(SP_IRONEYE_WEAKNESS_ACTIVE));
+    fn clear_ironeye_weakness_marks(&mut self, world_chr_man: &mut HudWorld, config: &RoleConfig) {
+        for handle in self
+            .ironeye_weakness_marks
+            .drain()
+            .map(|(handle, _)| handle)
+        {
+            if let Some(enemy) = hud_actor_by_handle(world_chr_man, &handle) {
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::remove_effect(
+                            enemy.identity.address,
+                            config.effect(SP_IRONEYE_WEAKNESS_ACTIVE),
+                        )
+                    },
+                );
             }
         }
     }
 
     fn update_recluse_blood_song(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         now: Instant,
         damage_events: &[DamageHookEvent],
     ) {
@@ -1957,24 +2135,21 @@ impl ChargeState {
         self.recluse_blood_debug.pending = self.recluse_blood_pending_damage.len();
     }
 
-    fn apply_recluse_blood_song_rewards(&mut self, world_chr_man: &mut WorldChrMan, now: Instant) {
+    fn apply_recluse_blood_song_rewards(&mut self, world_chr_man: &mut HudWorld, now: Instant) {
         self.recluse_blood_debug.resolved = 0;
         self.recluse_blood_debug.expired = 0;
         if self.recluse_blood_pending_damage.is_empty() {
             return;
         }
-        let Some((player_handle, player_team_type)) =
-            world_chr_man.main_player.as_ref().map(|player| {
-                (
-                    player.chr_ins.field_ins_handle,
-                    player.chr_ins.team_type,
-                )
-            })
+        let Some((player_handle, player_team_type)) = world_chr_man
+            .player
+            .as_ref()
+            .map(|player| (player.actor.handle, player.actor.team))
         else {
             return;
         };
 
-        let mut restores: HashMap<FieldInsHandle, (i32, i32)> = HashMap::new();
+        let mut restores: HashMap<HudHandle, (i32, i32)> = HashMap::new();
         let pending_events = std::mem::take(&mut self.recluse_blood_pending_damage);
         let mut retained = Vec::new();
         for event in pending_events {
@@ -1995,11 +2170,11 @@ impl ChargeState {
             else {
                 continue;
             };
-            let Some(enemy) = world_chr_man.chr_ins_by_handle(&handle) else {
+            let Some(enemy) = hud_actor_by_handle(world_chr_man, &handle) else {
                 self.recluse_blood_debug.expired += 1;
                 continue;
             };
-            let raw_attacker = enemy.last_hit_by;
+            let raw_attacker = enemy.last_effect_source;
             let attacker = if raw_attacker.is_empty() {
                 player_handle
             } else {
@@ -2011,8 +2186,8 @@ impl ChargeState {
                 player_handle,
                 player_team_type,
             );
-            self.recluse_blood_debug.last_attacker_container = attacker.selector.container();
-            self.recluse_blood_debug.last_attacker_index = attacker.selector.index();
+            self.recluse_blood_debug.last_attacker_container = attacker.diagnostic_set_index();
+            self.recluse_blood_debug.last_attacker_index = attacker.diagnostic_ordinal();
             self.recluse_blood_debug.last_attacker_friendly = attacker_friendly;
             if !attacker_friendly {
                 retained.push(event);
@@ -2061,12 +2236,32 @@ impl ChargeState {
         }
     }
 
-    fn refresh_recluse_blood_brands(&mut self, world_chr_man: &WorldChrMan) {
+    fn refresh_recluse_blood_brands(&mut self, world_chr_man: &HudWorld) {
         let brand_sp_effect = role_config(Role::Recluse).effect(SP_RECLUSE_BLOOD_SOUL_BRAND);
         let fixed_fp_sp_effect = SP_RECLUSE_BLOOD_SOUL_FIXED_FP_BRAND;
         let mut seen = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
-            let enemy = unsafe { entry.chr_ins.as_ref() };
+        let entries = match native_world::update_entries(world_chr_man.object.address) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                return;
+            }
+        };
+        for entry in entries {
+            if let Err(error) = native_world::revalidate(entry.character) {
+                eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                return;
+            }
+            // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+            // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+            let copied = match HudActor::observe(entry.character) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                    return;
+                }
+            };
+            let enemy = &copied;
             if scholar_reject_reason(enemy).is_some() {
                 continue;
             }
@@ -2079,7 +2274,7 @@ impl ChargeState {
             if damage_module == 0 {
                 continue;
             }
-            let handle = enemy.field_ins_handle;
+            let handle = enemy.handle;
             let kind = if has_normal_brand {
                 RecluseBloodBrandKind::Normal
             } else {
@@ -2098,15 +2293,35 @@ impl ChargeState {
             .retain(|handle, _| seen.contains(handle));
     }
 
-    fn update_duchess_replay_history(&mut self, world_chr_man: &WorldChrMan, role: Role) {
+    fn update_duchess_replay_history(&mut self, world_chr_man: &HudWorld, role: Role) {
         if role != Role::Duchess {
             self.duchess_snapshots.clear();
             return;
         }
 
         let mut seen = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
-            let enemy = unsafe { entry.chr_ins.as_ref() };
+        let entries = match native_world::update_entries(world_chr_man.object.address) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                return;
+            }
+        };
+        for entry in entries {
+            if let Err(error) = native_world::revalidate(entry.character) {
+                eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                return;
+            }
+            // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+            // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+            let copied = match HudActor::observe(entry.character) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                    return;
+                }
+            };
+            let enemy = &copied;
             if scholar_reject_reason(enemy).is_some() {
                 continue;
             }
@@ -2130,10 +2345,10 @@ impl ChargeState {
 
     fn update_scholar_sympathy(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         role: Role,
         active_effects: &[i32],
-        locked_on_enemy: FieldInsHandle,
+        locked_on_enemy: HudHandle,
         now: Instant,
     ) {
         self.prune_scholar_damage_numbers(now);
@@ -2158,8 +2373,9 @@ impl ChargeState {
     }
 
     fn prune_scholar_damage_numbers(&mut self, now: Instant) {
-        self.scholar_damage_numbers
-            .retain(|number| (now - number.created_at).as_secs_f32() < SCHOLAR_DAMAGE_NUMBER_SECONDS);
+        self.scholar_damage_numbers.retain(|number| {
+            (now - number.created_at).as_secs_f32() < SCHOLAR_DAMAGE_NUMBER_SECONDS
+        });
     }
 
     fn prune_scholar_native_damage_ignores(&mut self, now: Instant) {
@@ -2169,9 +2385,9 @@ impl ChargeState {
 
     fn apply_scholar_sympathy_hp_losses(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         links: &[ScholarLink],
-        locked_on_enemy: FieldInsHandle,
+        locked_on_enemy: HudHandle,
         now: Instant,
     ) {
         for source in links {
@@ -2222,7 +2438,7 @@ impl ChargeState {
 
     fn apply_scholar_sympathy_enemy_damage(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         links: &[ScholarLink],
         source: &ScholarLink,
         damage: i32,
@@ -2240,7 +2456,7 @@ impl ChargeState {
 
         let ally_heal = scholar_scaled_amount(damage, SCHOLAR_SYMPATHY_ATTACK_HEAL_RATE);
         if ally_heal > 0 {
-            for ally in links.iter().filter(|link| scholar_link_is_friendly(*link)) {
+            for ally in links.iter().filter(|link| scholar_link_is_friendly(link)) {
                 apply_hp_delta_by_handle(world_chr_man, ally.handle, ally_heal);
             }
         }
@@ -2248,11 +2464,11 @@ impl ChargeState {
 
     fn apply_scholar_sympathy_self_counter(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         links: &[ScholarLink],
         source: &ScholarLink,
         damage: i32,
-        locked_on_enemy: FieldInsHandle,
+        locked_on_enemy: HudHandle,
         now: Instant,
     ) {
         let Some(attacker) = scholar_counter_attacker(
@@ -2273,7 +2489,7 @@ impl ChargeState {
 
     fn apply_scholar_sympathy_ally_counter(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         links: &[ScholarLink],
         source: &ScholarLink,
         damage: i32,
@@ -2297,11 +2513,11 @@ impl ChargeState {
 
     fn apply_scholar_sympathy_heals(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         links: &[ScholarLink],
         now: Instant,
     ) {
-        for source in links.iter().filter(|link| scholar_link_is_friendly(*link)) {
+        for source in links.iter().filter(|link| scholar_link_is_friendly(link)) {
             let Some(previous_hp) = self.scholar_sympathy_hp.get(&source.handle).copied() else {
                 continue;
             };
@@ -2314,7 +2530,7 @@ impl ChargeState {
             if ally_heal > 0 {
                 for ally in links
                     .iter()
-                    .filter(|link| scholar_link_is_friendly(*link) && link.handle != source.handle)
+                    .filter(|link| scholar_link_is_friendly(link) && link.handle != source.handle)
                 {
                     apply_hp_delta_by_handle(world_chr_man, ally.handle, ally_heal);
                 }
@@ -2334,8 +2550,8 @@ impl ChargeState {
 
     fn apply_scholar_popup_damage(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
-        handle: FieldInsHandle,
+        world_chr_man: &mut HudWorld,
+        handle: HudHandle,
         damage: i32,
         now: Instant,
     ) {
@@ -2354,8 +2570,8 @@ impl ChargeState {
 
     fn apply_scholar_speffect_damage(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
-        handle: FieldInsHandle,
+        world_chr_man: &mut HudWorld,
+        handle: HudHandle,
         damage: i32,
         now: Instant,
     ) -> bool {
@@ -2371,8 +2587,8 @@ impl ChargeState {
 
     fn push_scholar_damage_number(
         &mut self,
-        world_chr_man: &WorldChrMan,
-        handle: FieldInsHandle,
+        world_chr_man: &HudWorld,
+        handle: HudHandle,
         amount: i32,
         now: Instant,
     ) {
@@ -2391,7 +2607,7 @@ impl ChargeState {
         });
     }
 
-    fn add_scholar_speffect_damage_ignore(&mut self, handle: FieldInsHandle, now: Instant) {
+    fn add_scholar_speffect_damage_ignore(&mut self, handle: HudHandle, now: Instant) {
         let expires_at = now + Duration::from_secs_f32(SCHOLAR_SPEFFECT_DAMAGE_IGNORE_SECONDS);
         self.scholar_native_damage_ignores
             .entry(handle)
@@ -2402,11 +2618,7 @@ impl ChargeState {
             .or_insert((i32::MAX / 4, expires_at));
     }
 
-    fn consume_scholar_native_damage_ignore(
-        &mut self,
-        handle: FieldInsHandle,
-        damage: i32,
-    ) -> i32 {
+    fn consume_scholar_native_damage_ignore(&mut self, handle: HudHandle, damage: i32) -> i32 {
         let Some((ignored, _)) = self.scholar_native_damage_ignores.get_mut(&handle) else {
             return 0;
         };
@@ -2418,7 +2630,7 @@ impl ChargeState {
         consumed
     }
 
-    fn refresh_scholar_sympathy_hp(&mut self, world_chr_man: &WorldChrMan, links: &[ScholarLink]) {
+    fn refresh_scholar_sympathy_hp(&mut self, world_chr_man: &HudWorld, links: &[ScholarLink]) {
         let mut next = HashMap::new();
         for link in links {
             if let Some(hp) = hp_by_handle(world_chr_man, link.handle) {
@@ -2428,14 +2640,15 @@ impl ChargeState {
         self.scholar_sympathy_hp = next;
     }
 
+    #[allow(clippy::too_many_arguments, reason = "Keep the existing role input snapshot together")]
     fn consume_inputs(
         &mut self,
-        player: &mut eldenring::cs::PlayerIns,
+        player: &mut HudPlayer,
         config: &RoleConfig,
         active_effects: &[i32],
         locked_element: Option<RecluseElement>,
         locked_damage_module: Option<usize>,
-        world_chr_man: *mut WorldChrMan,
+        world_chr_man: &mut HudWorld,
         now: Instant,
     ) {
         let skill_used = consume_event_effect(player, active_effects, config, SP_SKILL_USED);
@@ -2554,7 +2767,16 @@ impl ChargeState {
                 {
                     let effect = self.begin_undertaker_skill(skill_enhanced_use_allowed, now);
                     clear_undertaker_skill_effects(player);
-                    player.apply_speffect(effect, true);
+                    native_character::report_effect_result(
+                        // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                        unsafe {
+                            native_character::apply_effect(
+                                player.actor.identity.address,
+                                effect,
+                                true,
+                            )
+                        },
+                    );
                 }
             }
         }
@@ -2577,43 +2799,48 @@ impl ChargeState {
         }
     }
 
-    fn apply_scholar_self_effect(
-        &mut self,
-        player: &mut eldenring::cs::PlayerIns,
-        config: &RoleConfig,
-    ) {
+    fn apply_scholar_self_effect(&mut self, player: &mut HudPlayer, config: &RoleConfig) {
         if let Some(stage) = self.best_scholar_stage() {
             clear_scholar_self_outputs(player, config);
-            player.apply_speffect(
-                config.effect(SP_SCHOLAR_SELF_STAGE_BASE + stage as i32 - 1),
-                true,
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        player.actor.identity.address,
+                        config.effect(SP_SCHOLAR_SELF_STAGE_BASE + stage as i32 - 1),
+                        true,
+                    )
+                },
             );
         }
     }
 
-    fn apply_scholar_enemy_effect(&mut self, world_chr_man: *mut WorldChrMan, config: &RoleConfig) {
-        let Some(world_chr_man) = (unsafe { world_chr_man.as_mut() }) else {
-            return;
-        };
+    fn apply_scholar_enemy_effect(&mut self, world_chr_man: &mut HudWorld, config: &RoleConfig) {
         let targets = self.scholar_enemy_effect_targets();
         self.clear_scholar_enemy_effects(world_chr_man, config);
         for (handle, stage) in targets {
-            let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) else {
+            let Some(mut enemy) = hud_actor_by_handle(world_chr_man, &handle) else {
                 continue;
             };
-            if scholar_reject_reason(enemy).is_some() {
+            if scholar_reject_reason(&enemy).is_some() {
                 continue;
             }
-            clear_scholar_enemy_outputs(enemy, config);
-            enemy.apply_speffect(
-                config.effect(SP_SCHOLAR_ENEMY_STAGE_BASE + stage as i32 - 1),
-                true,
+            clear_scholar_enemy_outputs(&mut enemy, config);
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        enemy.identity.address,
+                        config.effect(SP_SCHOLAR_ENEMY_STAGE_BASE + stage as i32 - 1),
+                        true,
+                    )
+                },
             );
             self.scholar_enemy_effect_targets.push(handle);
         }
     }
 
-    fn scholar_enemy_effect_targets(&self) -> Vec<(FieldInsHandle, usize)> {
+    fn scholar_enemy_effect_targets(&self) -> Vec<(HudHandle, usize)> {
         self.scholar_targets
             .iter()
             .filter_map(|(handle, target)| {
@@ -2625,14 +2852,10 @@ impl ChargeState {
             .collect()
     }
 
-    fn clear_scholar_enemy_effects(
-        &mut self,
-        world_chr_man: &mut WorldChrMan,
-        config: &RoleConfig,
-    ) {
+    fn clear_scholar_enemy_effects(&mut self, world_chr_man: &mut HudWorld, config: &RoleConfig) {
         for handle in self.scholar_enemy_effect_targets.drain(..) {
-            if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
-                clear_scholar_enemy_outputs(enemy, config);
+            if let Some(mut enemy) = hud_actor_by_handle(world_chr_man, &handle) {
+                clear_scholar_enemy_outputs(&mut enemy, config);
             }
         }
     }
@@ -2647,7 +2870,7 @@ impl ChargeState {
             .and_then(|(_, target)| target.stage())
     }
 
-    fn best_scholar_target(&self) -> Option<(FieldInsHandle, ScholarTargetState)> {
+    fn best_scholar_target(&self) -> Option<(HudHandle, ScholarTargetState)> {
         self.scholar_targets
             .iter()
             .filter(|(_, target)| target.progress > 0.0)
@@ -2661,7 +2884,7 @@ impl ChargeState {
 
     fn handle_recluse_skill(
         &mut self,
-        player: &mut eldenring::cs::PlayerIns,
+        player: &mut HudPlayer,
         config: &RoleConfig,
         locked_element: Option<RecluseElement>,
         locked_damage_module: Option<usize>,
@@ -2689,13 +2912,37 @@ impl ChargeState {
             .then(|| self.recluse_magic_index())
             .flatten();
         clear_recluse_absorb_outputs(player, config);
-        player.apply_speffect(config.effect(SP_RECLUSE_RESTORE_FP), true);
-        player.apply_speffect(config.effect(element.absorb_effect_offset()), true);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::apply_effect(
+                    player.actor.identity.address,
+                    config.effect(SP_RECLUSE_RESTORE_FP),
+                    true,
+                )
+            },
+        );
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::apply_effect(
+                    player.actor.identity.address,
+                    config.effect(element.absorb_effect_offset()),
+                    true,
+                )
+            },
+        );
         if let Some(magic_index) = self.recluse_ready_magic {
             clear_recluse_magic_outputs(player, config);
-            player.apply_speffect(
-                config.effect(SP_RECLUSE_MIXED_MAGIC_BASE + magic_index as i32 - 1),
-                true,
+            native_character::report_effect_result(
+                // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                unsafe {
+                    native_character::apply_effect(
+                        player.actor.identity.address,
+                        config.effect(SP_RECLUSE_MIXED_MAGIC_BASE + magic_index as i32 - 1),
+                        true,
+                    )
+                },
             );
         }
         self.recluse_outputs_clear_at =
@@ -2704,18 +2951,35 @@ impl ChargeState {
 
     fn handle_duchess_skill(
         &mut self,
-        player: &mut eldenring::cs::PlayerIns,
-        world_chr_man: *mut WorldChrMan,
+        player: &mut HudPlayer,
+        world_chr_man: &mut HudWorld,
         now: Instant,
     ) {
-        let Some(world_chr_man) = (unsafe { world_chr_man.as_mut() }) else {
-            return;
-        };
-        let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
+        let player_pos = hud_physics_position(&player.actor);
         let mut targets = Vec::new();
 
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
-            let enemy = unsafe { entry.chr_ins.as_ref() };
+        let entries = match native_world::update_entries(world_chr_man.object.address) {
+            Ok(entries) => entries,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+                return;
+            }
+        };
+        for entry in entries {
+            if let Err(error) = native_world::revalidate(entry.character) {
+                eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+                return;
+            }
+            // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+            // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+            let copied = match HudActor::observe(entry.character) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                    return;
+                }
+            };
+            let enemy = &copied;
             if scholar_reject_reason(enemy).is_some() {
                 continue;
             }
@@ -2727,7 +2991,7 @@ impl ChargeState {
             let payload =
                 duchess_replay_payload_for(damage_module, now).scaled(DUCHESS_REPLAY_RATE);
             if payload.has_effect() {
-                targets.push((enemy.field_ins_handle, damage_module, payload));
+                targets.push((enemy.handle, damage_module, payload));
             }
         }
 
@@ -2738,8 +3002,8 @@ impl ChargeState {
 
     fn apply_duchess_replay(
         &mut self,
-        world_chr_man: &mut WorldChrMan,
-        handle: FieldInsHandle,
+        world_chr_man: &mut HudWorld,
+        handle: HudHandle,
         damage_module: usize,
         payload: DuchessReplayPayload,
     ) {
@@ -2747,17 +3011,26 @@ impl ChargeState {
             return;
         }
         if set_duchess_replay_speffect(payload) {
-            if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
+            if let Some(mut enemy) = hud_actor_by_handle(world_chr_man, &handle) {
                 add_duchess_replay_ignore(damage_module, payload);
-                enemy.apply_speffect(SP_DUCHESS_REPLAY_DAMAGE, true);
-                apply_duchess_replay_posture_damage(enemy, payload);
+                native_character::report_effect_result(
+                    // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+                    unsafe {
+                        native_character::apply_effect(
+                            enemy.identity.address,
+                            SP_DUCHESS_REPLAY_DAMAGE,
+                            true,
+                        )
+                    },
+                );
+                apply_duchess_replay_posture_damage(&mut enemy, payload);
             }
             return;
         }
 
-        if let Some(enemy) = world_chr_man.chr_ins_by_handle_mut(&handle) {
+        if let Some(mut enemy) = hud_actor_by_handle(world_chr_man, &handle) {
             if payload.hp_damage > 0 {
-                apply_chr_hp_delta(enemy, -payload.hp_damage);
+                apply_chr_hp_delta(&mut enemy, -payload.hp_damage);
             }
             add_duchess_replay_ignore(
                 damage_module,
@@ -2767,11 +3040,11 @@ impl ChargeState {
                     super_armor_damage: payload.super_armor_damage,
                 },
             );
-            apply_duchess_replay_posture_damage(enemy, payload);
+            apply_duchess_replay_posture_damage(&mut enemy, payload);
         }
     }
 
-    fn clear_recluse_magic(&mut self, player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
+    fn clear_recluse_magic(&mut self, player: &mut HudPlayer, config: &RoleConfig) {
         self.recluse_elements = [None, None, None];
         self.recluse_ready_magic = None;
         clear_recluse_magic_outputs(player, config);
@@ -2814,7 +3087,7 @@ impl ChargeState {
 
     fn clear_recluse_transient_outputs(
         &mut self,
-        player: &mut eldenring::cs::PlayerIns,
+        player: &mut HudPlayer,
         config: &RoleConfig,
         now: Instant,
     ) {
@@ -2850,7 +3123,7 @@ impl ChargeState {
         (now - self.last_critical_gain).as_secs_f32() >= ULTIMATE_CRITICAL_GAIN_INTERVAL
     }
 
-    fn sync_output_speffects(&self, player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
+    fn sync_output_speffects(&self, player: &mut HudPlayer, config: &RoleConfig) {
         let skill_ready_count = self.skill_ready_count(config);
         set_effect(
             player,
@@ -2872,7 +3145,7 @@ impl ChargeState {
 
     fn snapshot(
         &self,
-        world_chr_man: &WorldChrMan,
+        world_chr_man: &HudWorld,
         config: &RoleConfig,
         action_pressed: bool,
         now: Instant,
@@ -2888,15 +3161,14 @@ impl ChargeState {
             config.role == Role::Undertaker && self.undertaker_free_ultimate_active(now);
 
         let mut skill_layers = self.skill_layers;
-        if config.skill_kind == SkillKind::UndertakerBuff {
-            if let Some(end) = self.undertaker_buff_end {
+        if config.skill_kind == SkillKind::UndertakerBuff
+            && let Some(end) = self.undertaker_buff_end {
                 let remaining = (end - now).as_secs_f32();
                 skill_layers = [
                     (remaining / self.undertaker_buff_duration).clamp(0.0, 1.0),
                     0.0,
                 ];
             }
-        }
         let mut scholar_targets = [ScholarTargetSnapshot::default(); SCHOLAR_SCAN_MAX_TARGETS];
         let mut scholar_damage_numbers =
             [ScholarDamageNumberSnapshot::default(); SCHOLAR_DAMAGE_NUMBER_MAX];
@@ -2914,14 +3186,13 @@ impl ChargeState {
             }
         }
         if config.role == Role::Ironeye {
-            if let Some(player) = world_chr_man.main_player.as_ref() {
+            if let Some(player) = world_chr_man.player {
                 for (slot, (handle, mark)) in ironeye_weakness_marks
                     .iter_mut()
                     .zip(self.ironeye_weakness_marks.iter())
                 {
-                    let Some(pos) = world_chr_man
-                        .chr_ins_by_handle(handle)
-                        .and_then(|target| ironeye_weakness_marker_screen_pos(player, target))
+                    let Some(pos) = hud_actor_by_handle(world_chr_man, handle)
+                        .and_then(|target| ironeye_weakness_marker_screen_pos(&player, &target))
                     else {
                         continue;
                     };
@@ -3049,7 +3320,7 @@ impl ChargeState {
             revenant_active_handle_container: if config.role == Role::Revenant {
                 self.revenant_active_summon
                     .and_then(|index| self.revenant_summon_handles[index])
-                    .map(|handle| handle.selector.container())
+                    .map(|handle| handle.diagnostic_set_index())
                     .unwrap_or(u32::MAX)
             } else {
                 u32::MAX
@@ -3057,7 +3328,7 @@ impl ChargeState {
             revenant_active_handle_index: if config.role == Role::Revenant {
                 self.revenant_active_summon
                     .and_then(|index| self.revenant_summon_handles[index])
-                    .map(|handle| handle.selector.index())
+                    .map(|handle| handle.diagnostic_ordinal())
                     .unwrap_or(u32::MAX)
             } else {
                 u32::MAX
@@ -3065,8 +3336,8 @@ impl ChargeState {
             revenant_active_npc_id: if config.role == Role::Revenant {
                 self.revenant_active_summon
                     .and_then(|index| self.revenant_summon_handles[index])
-                    .and_then(|handle| world_chr_man.chr_ins_by_handle(&handle))
-                    .map(|chr| chr.npc_id)
+                    .and_then(|handle| hud_actor_by_handle(world_chr_man, &handle))
+                    .map(|chr| chr.resource_number)
                     .unwrap_or(-1)
             } else {
                 -1
@@ -3111,31 +3382,38 @@ impl ChargeState {
     }
 }
 
-fn wylder_skill_lock_target(world_chr_man: &WorldChrMan) -> Option<WylderSkillLockTarget> {
-    let Some(player) = world_chr_man.main_player.as_ref() else {
-        return None;
-    };
-    wylder_skill_lock_enemy_target_pos(world_chr_man, player)
-        .or_else(|| wylder_skill_lock_wall_target_pos(player))
+fn wylder_skill_lock_target(world_chr_man: &HudWorld) -> Option<WylderSkillLockTarget> {
+    let player = world_chr_man.player?;
+    wylder_skill_lock_enemy_target_pos(world_chr_man, &player)
+        .or_else(|| wylder_skill_lock_wall_target_pos(&player))
 }
 
-fn sync_precision_calibration_outputs(
-    world_chr_man: &mut WorldChrMan,
-    active_effects: &[i32],
-) {
+fn sync_precision_calibration_outputs(world_chr_man: &mut HudWorld, active_effects: &[i32]) {
     let calibration_active = active_effects.contains(&SP_PRECISION_CALIBRATION);
     let has_target = calibration_active && precision_calibration_has_enemy_target(world_chr_man);
-    let Some(player) = world_chr_man.main_player.as_mut() else {
+    let Some(player) = world_chr_man.player.as_mut() else {
         return;
     };
 
     if !calibration_active {
-        player
-            .chr_ins
-            .remove_speffect(SP_PRECISION_CALIBRATION_NO_TARGET);
-        player
-            .chr_ins
-            .remove_speffect(SP_PRECISION_CALIBRATION_TARGET);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    SP_PRECISION_CALIBRATION_NO_TARGET,
+                )
+            },
+        );
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    SP_PRECISION_CALIBRATION_TARGET,
+                )
+            },
+        );
         return;
     }
 
@@ -3151,34 +3429,55 @@ fn sync_precision_calibration_outputs(
     };
 
     if active_effects.contains(&undesired) {
-        player.chr_ins.remove_speffect(undesired);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, undesired) },
+        );
     }
     if !active_effects.contains(&desired) {
-        player.apply_speffect(desired, true);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::apply_effect(player.actor.identity.address, desired, true) },
+        );
     }
 }
 
-fn precision_calibration_has_enemy_target(world_chr_man: &WorldChrMan) -> bool {
-    let Some(player) = world_chr_man.main_player.as_ref() else {
+fn precision_calibration_has_enemy_target(world_chr_man: &HudWorld) -> bool {
+    let Some(player) = world_chr_man.player else {
         return false;
     };
-    wylder_skill_lock_enemy_target_pos(world_chr_man, player).is_some()
+    wylder_skill_lock_enemy_target_pos(world_chr_man, &player).is_some()
 }
 
 fn wylder_skill_lock_enemy_target_pos(
-    world_chr_man: &WorldChrMan,
-    player: &PlayerIns,
+    world_chr_man: &HudWorld,
+    player: &HudPlayer,
 ) -> Option<WylderSkillLockTarget> {
-    let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
-    let mut scanned = 0usize;
+    let player_pos = hud_physics_position(&player.actor);
     let mut best: Option<(WylderSkillLockTarget, f32)> = None;
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
-        if scanned >= WYLDER_SKILL_LOCK_MAX_DISTANCE_ENTRIES {
-            break;
+    let entries = match native_world::update_entries(world_chr_man.object.address) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+            return None;
         }
-        scanned += 1;
+    };
+    for entry in entries.into_iter().take(WYLDER_SKILL_LOCK_MAX_DISTANCE_ENTRIES) {
 
-        let chr = unsafe { entry.chr_ins.as_ref() };
+        if let Err(error) = native_world::revalidate(entry.character) {
+            eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+            return None;
+        }
+        // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+        // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+        let copied = match HudActor::observe(entry.character) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                return None;
+            }
+        };
+        let chr = &copied;
         if scholar_reject_reason(chr).is_some() {
             continue;
         }
@@ -3203,7 +3502,7 @@ fn wylder_skill_lock_enemy_target_pos(
         } {
             best = Some((
                 WylderSkillLockTarget {
-                    kind: WylderSkillLockTargetKind::Enemy(chr.field_ins_handle),
+                    kind: WylderSkillLockTargetKind::Enemy(chr.handle),
                     screen_pos,
                     world_pos: target_pos,
                     distance: target_distance,
@@ -3215,11 +3514,8 @@ fn wylder_skill_lock_enemy_target_pos(
     best.map(|(target, _)| target)
 }
 
-fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<WylderSkillLockTarget> {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
-        return None;
-    };
-    let Ok(havok) = (unsafe { CSHavokMan::instance() }) else {
+fn wylder_skill_lock_wall_target_pos(player: &HudPlayer) -> Option<WylderSkillLockTarget> {
+    let Ok(camera) = native_camera::HudCamera::observe() else {
         return None;
     };
     let cam = camera.pers_cam_1.as_ref();
@@ -3229,33 +3525,32 @@ fn wylder_skill_lock_wall_target_pos(player: &PlayerIns) -> Option<WylderSkillLo
         return None;
     }
 
-    let physics = player.chr_ins.modules.as_ref().physics.as_ref();
-    let origin = HavokPosition(
-        physics.position.0,
-        physics.position.1 + (physics.hit_height * 0.62).clamp(0.8, 2.2),
-        physics.position.2,
-        0.0,
-    );
+    let physics = native_character::physics_shape(player.actor.identity.address)
+        .map_err(|error| eprintln!("ShikiFSRS HUD wall origin rejected: {error}"))
+        .ok()?;
+    let [x, y, z, _] = physics.position_bits.map(f32::from_bits);
+    let origin = HudPosition(x, y + (physics.height * 0.62).clamp(0.8, 2.2), z, 0.0);
     let distance = WYLDER_SKILL_LOCK_MAX_DISTANCE;
-    let delta = PositionDelta(
+    let delta = HudDelta(
         forward.0 / len * distance,
         forward.1 / len * distance,
         forward.2 / len * distance,
     );
     let mut best: Option<WylderSkillLockTarget> = None;
     for filter in WYLDER_SKILL_LOCK_WALL_FILTERS {
-        let Some(hit) = havok
-            .phys_world
-            .as_ref()
-            .cast_ray(filter, &origin, delta, player)
-        else {
-            continue;
+        let hit = match hud_cast_ray(player, filter, origin, delta) {
+            Ok(Some(hit)) => hit,
+            Ok(None) => continue,
+            Err(error) => {
+                eprintln!(
+                    "ShikiFSRS HUD line query failed or uncertain; receipt retained: {error}"
+                );
+                return None;
+            }
         };
         let hit_distance = distance_havok(origin, hit);
-        let hit_screen_pos = project_lock_on_position(
-            fromsoftware_shared::F32Vector4(hit.0, hit.1, hit.2, 1.0),
-            cam,
-        );
+        let hit_screen_pos =
+            project_lock_on_position(native_camera::Vector4(hit.0, hit.1, hit.2, 1.0), cam);
         if hit_distance.is_finite()
             && hit_distance > WYLDER_SKILL_LOCK_MIN_WALL_HIT_DISTANCE
             && hit_distance <= WYLDER_SKILL_LOCK_MAX_DISTANCE
@@ -3287,18 +3582,17 @@ fn wylder_skill_lock_distance_scale(distance: f32) -> f32 {
 
 fn wylder_skill_lock_screen_pos_in_reticle(pos: [f32; 2]) -> bool {
     wylder_skill_lock_screen_pos_score(pos).is_some_and(|score| {
-        let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+        let Ok(window) = native_camera::HudWindow::observe() else {
             return false;
         };
-        let radius =
-            (window.screen_height as f32).min(window.screen_width as f32)
-                * WYLDER_SKILL_LOCK_SCREEN_RADIUS_FACTOR;
+        let radius = (window.screen_height as f32).min(window.screen_width as f32)
+            * WYLDER_SKILL_LOCK_SCREEN_RADIUS_FACTOR;
         score <= radius * radius
     })
 }
 
 fn wylder_skill_lock_screen_pos_score(pos: [f32; 2]) -> Option<f32> {
-    let Ok(window) = (unsafe { CSWindowImp::instance() }) else {
+    let Ok(window) = native_camera::HudWindow::observe() else {
         return None;
     };
     let width = window.screen_width as f32;
@@ -3335,14 +3629,15 @@ fn apply_camera_directed_position_delta_if_active() {
         return;
     }
 
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
+    let Ok(mut copied_world) = HudWorld::observe() else {
         return;
     };
-    let Some(player) = world_chr_man.main_player.as_mut() else {
+    let world_chr_man = &mut copied_world;
+    let Some(player) = world_chr_man.player.as_mut() else {
         return;
     };
-    let current_position = player.chr_ins.modules.as_ref().physics.as_ref().position;
-    if !chr_has_speffect(&player.chr_ins, CAMERA_DIRECTED_MOVEMENT_EFFECT) {
+    let current_position = hud_physics_position(&player.actor);
+    if !chr_has_speffect(&player.actor, CAMERA_DIRECTED_MOVEMENT_EFFECT) {
         if let Ok(mut last) = CAMERA_DIRECTED_LAST_POSITION.lock() {
             *last = None;
         }
@@ -3373,42 +3668,40 @@ fn apply_camera_directed_position_delta_if_active() {
         || !previous_position.2.is_finite()
         || !dy.is_finite()
         || !horizontal_len.is_finite()
-        || horizontal_len < CAMERA_DIRECTED_MIN_FRAME_DELTA
-        || horizontal_len > CAMERA_DIRECTED_MAX_FRAME_DELTA
+        || !(CAMERA_DIRECTED_MIN_FRAME_DELTA..=CAMERA_DIRECTED_MAX_FRAME_DELTA).contains(&horizontal_len)
         || dy.abs() > CAMERA_DIRECTED_MAX_FRAME_DELTA
     {
         *last_position = Some(current_position);
         return;
     }
 
-    let vertical_delta =
-        (camera_pitch * horizontal_len).clamp(-CAMERA_DIRECTED_MAX_VERTICAL_DELTA, CAMERA_DIRECTED_MAX_VERTICAL_DELTA);
-    let redirected_position = HavokPosition(
+    let vertical_delta = (camera_pitch * horizontal_len).clamp(
+        -CAMERA_DIRECTED_MAX_VERTICAL_DELTA,
+        CAMERA_DIRECTED_MAX_VERTICAL_DELTA,
+    );
+    let redirected_position = HudPosition(
         current_position.0,
         previous_position.1 + vertical_delta,
         current_position.2,
         current_position.3,
     );
 
-    {
-        let physics = player.chr_ins.modules.as_mut().physics.as_mut();
-        physics.position = redirected_position;
-        physics.chr_proxy_pos_update_requested = true;
-        physics.standing_on_solid_ground = true;
-        physics.touching_solid_ground = true;
+    // SAFETY: Host movement callback supplies the pinned actor/controller/physics graph
+    // and exclusive update phase. The SDK retains both actual stores, including partial failure.
+    if let Err(error) = unsafe { native_character::publish_primary_position(
+        player.actor.identity,
+        [redirected_position.0, redirected_position.1, redirected_position.2, redirected_position.3]
+            .map(f32::to_bits),
+    ) } {
+        eprintln!("ShikiFSRS HUD camera movement publication rejected: {error}");
+        return;
     }
-    player
-        .chr_ins
-        .chr_ctrl
-        .as_mut()
-        .chr_proxy_flags
-        .set_position_sync_requested(true);
 
     *last_position = Some(redirected_position);
 }
 
 fn camera_pitch_direction() -> Option<f32> {
-    let Ok(camera) = (unsafe { CSCamera::instance() }) else {
+    let Ok(camera) = native_camera::HudCamera::observe() else {
         return None;
     };
     let forward = camera.pers_cam_1.forward();
@@ -3437,54 +3730,67 @@ const REVENANT_PASSIVE_BUDDY_PARAM_IDS: [u32; REVENANT_CONVERTED_SOUL_LIMIT] = [
 
 #[derive(Clone, Copy)]
 struct RevenantPassiveCandidate {
-    handle: FieldInsHandle,
+    handle: HudHandle,
     npc_id: i32,
     npc_param_id: i32,
     npc_think_param_id: i32,
-    position: HavokPosition,
+    position: HudPosition,
 }
 
 fn revenant_passive_candidate(
-    chr: &ChrIns,
-    player_handle: FieldInsHandle,
+    chr: &HudActor,
+    player_handle: HudHandle,
 ) -> Option<RevenantPassiveCandidate> {
-    if chr.field_ins_handle.is_empty()
-        || chr.field_ins_handle == player_handle
-        || chr.last_hit_by != player_handle
-        || chr.team_type == REVENANT_CONVERTED_SOUL_TEAM_TYPE
-        || chr.chr_type != ChrType::Npc
-        || REVENANT_BUDDY_PARAM_IDS.contains(&(chr.npc_param_id as u32))
+    if chr.handle.is_empty()
+        || chr.handle == player_handle
+        || chr.last_effect_source != player_handle
+        || chr.team == REVENANT_CONVERTED_SOUL_TEAM_TYPE
+        // Independent TGA CHAR_TYPE metadata labels raw5 as NPC. This remains a
+        // consumer selection policy, separate from the exact primary RTTI type.
+        || chr.raw_kind != 5
+        || REVENANT_BUDDY_PARAM_IDS.contains(&(chr.npc_request_id as u32))
     {
         return None;
     }
 
-    let data = chr.modules.as_ref().data.as_ref();
-    if data.hp > 0 && !chr.chr_flags1c5.death_flag() {
+    let data = native_vitals::observe(chr.identity.address)
+        .map_err(|error| eprintln!("ShikiFSRS HUD passive vital copy rejected: {error}"))
+        .ok()?;
+    let flags = native_character::flags(chr.identity.address)
+        .map_err(|error| eprintln!("ShikiFSRS HUD passive status copy rejected: {error}"))
+        .ok()?;
+    if data.hp.current > 0 && !flags.native_death_marked() {
         return None;
     }
 
     let npc_think_param_id = revenant_enemy_think_param(chr)?;
-    if chr.npc_id <= 0
-        || chr.npc_id == 1000
-        || chr.npc_param_id <= 0
+    if chr.resource_number <= 0
+        || chr.resource_number == 1000
+        || chr.npc_request_id <= 0
         || npc_think_param_id <= 0
     {
         return None;
     }
 
     Some(RevenantPassiveCandidate {
-        handle: chr.field_ins_handle,
-        npc_id: chr.npc_id,
-        npc_param_id: chr.npc_param_id,
+        handle: chr.handle,
+        npc_id: chr.resource_number,
+        npc_param_id: chr.npc_request_id,
         npc_think_param_id,
-        position: chr.modules.as_ref().physics.as_ref().position,
+        position: hud_physics_position(chr),
     })
 }
 
-fn revenant_enemy_think_param(chr: &ChrIns) -> Option<i32> {
-    chr.as_subclass::<EnemyIns>()
-        .map(runtime_enemy_npc_think_param)
-        .filter(|think_param| *think_param > 0)
+fn revenant_enemy_think_param(chr: &HudActor) -> Option<i32> {
+    native_character::initializer_word(
+        chr.identity.address,
+        shikifsrs_elden_ring::character_parameters::CharacterInitializerWord::EnemyThinkRequest,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("ShikiFSRS HUD Think request copy rejected: {error}");
+        None
+    })
+    .filter(|think_param| *think_param > 0)
 }
 
 fn revenant_debug_spawn_submission_ready(
@@ -3496,6 +3802,7 @@ fn revenant_debug_spawn_submission_ready(
     !creator_busy && !has_unbound_request && now >= ready_at
 }
 
+#[cfg(test)]
 fn revenant_creator_request_consumed(request_pending: bool, creator_busy: bool) -> bool {
     request_pending && !creator_busy
 }
@@ -3513,32 +3820,52 @@ fn revenant_passive_candidate_validation(
         return Err("invalid-fields");
     }
 
-    let repository = unsafe { SoloParamRepository::instance() }.map_err(|_| "no-repository")?;
-    if repository
-        .get::<NpcParam>(candidate.npc_param_id as u32)
-        .is_none()
+    if !native_parameters::named_row_exists("NpcParam", candidate.npc_param_id as u32)
+        .map_err(|_| "npc-param-unavailable")?
     {
         return Err("missing-npc-param");
     }
-    if repository
-        .get::<NpcThinkParam>(candidate.npc_think_param_id as u32)
-        .is_none()
+    if !native_parameters::named_row_exists("NpcThinkParam", candidate.npc_think_param_id as u32)
+        .map_err(|_| "think-param-unavailable")?
     {
         return Err("missing-think-param");
     }
     Ok(())
 }
 
-fn revenant_converted_soul_should_disappear(chr: &ChrIns) -> bool {
-    let data = chr.modules.as_ref().data.as_ref();
-    data.hp <= 0 || chr.chr_flags1c5.death_flag() || runtime_chr_character_disabled(chr)
+fn revenant_converted_soul_identity_should_disappear(
+    character: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+) -> bool {
+    if native_world::revalidate(character).is_err() {
+        return false;
+    }
+    let data = match native_vitals::observe(character.address) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD retirement vital copy rejected: {error}");
+            // A failed observation cannot authorize retirement.
+            return false;
+        }
+    };
+    let flags = match native_character::flags(character.address) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD retirement status copy rejected: {error}");
+            return false;
+        }
+    };
+    let disabled = match native_character::debug_requests(character.address) {
+        Ok((_, disabled)) => disabled,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD retirement debug copy rejected: {error}");
+            return false;
+        }
+    };
+    data.hp.current <= 0 || flags.native_death_marked() || disabled
 }
 
-fn revenant_passive_roll(handle: FieldInsHandle, now: Instant) -> bool {
-    let mut value = handle.selector.0 as u64
-        ^ ((handle.block_id.area() as u64) << 32)
-        ^ ((handle.block_id.block() as u64) << 40)
-        ^ (now.elapsed().as_nanos() as u64);
+fn revenant_passive_roll(handle: HudHandle, now: Instant) -> bool {
+    let mut value = handle.passive_seed() ^ (now.elapsed().as_nanos() as u64);
     value ^= value >> 33;
     value = value.wrapping_mul(0xff51afd7ed558ccd);
     value ^= value >> 33;
@@ -3552,97 +3879,169 @@ fn reserve_revenant_passive_buddy_slot(
     npc_think_param_id: i32,
     active_souls: &HashMap<u32, RevenantConvertedSoul>,
 ) -> Option<(u32, i32)> {
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance_mut() }) else {
-        return None;
-    };
-
+    use shikifsrs_elden_ring::parameter_fields::{ParameterField as F, ScalarValue as V};
     for buddy_param_id in REVENANT_PASSIVE_BUDDY_PARAM_IDS {
         if active_souls.contains_key(&buddy_param_id) {
             continue;
         }
-
-        let Some(row) = param_repository.get_mut::<BuddyParam>(buddy_param_id) else {
-            continue;
-        };
-        let trigger_effect = row.trigger_sp_effect_id();
-        if trigger_effect <= 0 {
-            continue;
+        let trigger_effect =
+            match native_parameters::read_field(F::BuddyTriggerEffect, buddy_param_id) {
+                Ok(Some(V::I32(value))) if value > 0 => value,
+                Ok(_) => continue,
+                Err(error) => {
+                    append_damage_log(&format!("Buddy PARAM read rejected: {error}"));
+                    return None;
+                }
+            };
+        let edits = [
+            (F::BuddyNpc, V::I32(npc_param_id)),
+            (F::BuddyThink, V::I32(npc_think_param_id)),
+            (
+                F::BuddyRiddenNpc,
+                V::I32(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID),
+            ),
+            (
+                F::BuddyRiddenThink,
+                V::I32(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID),
+            ),
+        ];
+        if let Err(error) = native_parameters::write_fields(buddy_param_id, &edits) {
+            append_damage_log(&format!(
+                "Buddy reservation failed or uncertain; owner retained: {error}"
+            ));
+            return None;
         }
-
-        row.set_npc_param_id(npc_param_id);
-        row.set_npc_think_param_id(npc_think_param_id);
-        row.set_npc_param_id_ridden(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-        row.set_npc_think_param_id_ridden(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
         return Some((buddy_param_id, trigger_effect));
     }
-
     None
 }
 
-fn request_revenant_passive_summon(world_chr_man: &mut WorldChrMan, trigger_effect: i32) {
-    world_chr_man
-        .summon_buddy_manager
-        .item_use_cooldown_timer = 0.0;
-    world_chr_man
-        .summon_buddy_manager
-        .request_summon_speffect_id = trigger_effect;
+fn request_revenant_passive_summon(world_chr_man: &mut HudWorld, trigger_effect: i32) {
+    // SAFETY: This callback retains the exact complete exclusive native summon graph.
+    if let Err(error) =
+        unsafe { native_buddy::request(world_chr_man.object.address, trigger_effect) }
+    {
+        eprintln!(
+            "ShikiFSRS HUD summon request failed or uncertain; actual records retained: {error}"
+        );
+        return;
+    }
 
-    if let Some(player) = world_chr_man.main_player.as_deref_mut() {
-        player.apply_speffect(trigger_effect, true);
+    if let Some(player) = world_chr_man.player.as_mut() {
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::apply_effect(player.actor.identity.address, trigger_effect, true)
+            },
+        );
     }
 }
 
-fn prepare_revenant_passive_buddy(chr: &mut ChrIns) {
-    if !chr_has_speffect(chr, REVENANT_CONVERTED_SOUL_SPEFFECT) {
-        chr.apply_speffect(REVENANT_CONVERTED_SOUL_SPEFFECT, true);
+fn prepare_revenant_passive_buddy(address: u64) {
+    let effects = match native_character::effects(address) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD buddy effects copy rejected: {error}");
+            return;
+        }
+    };
+    if !effects.contains(&REVENANT_CONVERTED_SOUL_SPEFFECT) {
+        // SAFETY: This preparation retains the complete effect graph and exclusive native phase.
+        if let Err(error) = unsafe {
+            native_character::apply_effect(address, REVENANT_CONVERTED_SOUL_SPEFFECT, true)
+        } {
+            eprintln!("ShikiFSRS HUD buddy marker failed or uncertain; record retained: {error}");
+            return;
+        }
     }
 
-    chr.team_type = REVENANT_CONVERTED_SOUL_TEAM_TYPE;
-    chr.last_hit_by = FieldInsHandle::none();
-    chr.load_state.set_extinction_death(false);
-    chr.chr_flags1c4.set_is_render_group_enabled(true);
-    chr.chr_flags1c5.set_death_flag(false);
-    chr.chr_flags1c5.set_enable_render(true);
-    chr.chr_flags1c8.set_is_active(true);
-    chr.chr_activation_flags.set_activation_enabled(true);
-    update_runtime_chr_debug_flags(
-        chr,
-        CHR_DEBUG_FORCE_LOADED,
-        CHR_DEBUG_FORCE_UNLOADED
-            | CHR_DEBUG_CHARACTER_DISABLED
-            | CHR_DEBUG_DISABLED_UPDATES
-            | CHR_DEBUG_DISABLED_HIT
-            | CHR_DEBUG_DISABLED_MOVEMENT
-            | CHR_DEBUG_DISABLED_SECONDARY_ACTIONS,
-    );
-    chr.opacity_keyframes_multiplier = 1.0;
-    chr.opacity_keyframes_multiplier_previous = 1.0;
-    chr.tint_alpha_multiplier = 1.0;
-    chr.tint_alpha_multiplier_modifier = 1.0;
-    chr.camouflage_transparency = 1.0;
-    chr.base_transparency = 1.0;
-    chr.base_transparency_modifier = 1.0;
+    // SAFETY: The caller owns the live native character and selected stored team byte.
+    if let Err(error) =
+        unsafe { native_character::set_team(address, REVENANT_CONVERTED_SOUL_TEAM_TYPE) }
+    {
+        eprintln!("ShikiFSRS HUD buddy team write failed or uncertain; record retained: {error}");
+        return;
+    }
+    // SAFETY: This callback retains the experimental exclusive native character graph.
+    if let Err(error) = unsafe { native_character::clear_effect_source(address) } {
+        eprintln!(
+            "ShikiFSRS HUD effect-source clear failed or uncertain; record retained: {error}"
+        );
+        return;
+    }
+    // SAFETY: Retain exact writable request word; the latched/prior words stay read-only.
+    if let Err(error) = unsafe { native_character::set_loading_requests(address, 0x80, 0x80) } {
+        eprintln!("ShikiFSRS HUD loading request rejected; actual receipt retained: {error}");
+        return;
+    }
+    // SAFETY: Original HUD policy owns the selected initialized native result byte.
+    if let Err(error) = unsafe { native_character::set_group_mask_result(address, true) } {
+        eprintln!("ShikiFSRS HUD group result store rejected; actual receipt retained: {error}");
+        return;
+    }
+    // SAFETY: This callback retains the experimental exclusive native character graph.
+    if let Err(error) =
+        unsafe { native_character::set_presentation_marks(address, false, true, true) }
+    {
+        eprintln!("ShikiFSRS HUD presentation marks failed or uncertain; record retained: {error}");
+        return;
+    }
+    // SAFETY: This callback retains the experimental exclusive native character graph.
+    if let Err(error) = unsafe { native_character::set_policy_bit3(address, true) } {
+        eprintln!("ShikiFSRS HUD policy bit3 failed or uncertain; record retained: {error}");
+        return;
+    }
+    // SAFETY: Retain exact writable debug bytes and the full exclusive graph.
+    if let Err(error) = unsafe {
+        native_character::update_debug_requests(
+            address,
+            CHR_DEBUG_FORCE_LOADED,
+            CHR_DEBUG_FORCE_UNLOADED
+                | CHR_DEBUG_CHARACTER_DISABLED
+                | CHR_DEBUG_DISABLED_UPDATES
+                | CHR_DEBUG_DISABLED_HIT
+                | CHR_DEBUG_DISABLED_MOVEMENT
+                | CHR_DEBUG_DISABLED_SECONDARY_ACTIONS,
+        )
+    } {
+        eprintln!("ShikiFSRS HUD buddy debug stores rejected; records retained: {error}");
+        return;
+    }
+    // SAFETY: This callback retains the experimental exclusive native character graph.
+    if let Err(error) = unsafe { native_character::opacity(address, true) } {
+        eprintln!("ShikiFSRS HUD opacity writes failed or uncertain; record retained: {error}");
+        return;
+    }
 
-    let data = chr.modules.as_mut().data.as_mut();
-    let max_hp = data.max_hp.max(1);
-    if data.hp <= 0 {
-        data.hp = max_hp;
+    // SAFETY: Actual preparation owns the experimental exclusive native vital graph.
+    // The SDK retains the actual conditional store before validating its postflight.
+    if let Err(error) = unsafe {
+        native_vitals::change(
+            address,
+            shikifsrs_elden_ring::character_vitals::CharacterVital::Hp,
+            native_vitals::VitalChange::RecoverDead,
+        )
+    } {
+        eprintln!("ShikiFSRS HUD buddy recovery failed or uncertain; receipt retained: {error}");
     }
 }
 
-fn prepare_revenant_debug_soul(chr: &mut ChrIns) {
-    prepare_revenant_passive_buddy(chr);
-    chr.modules
-        .action_flag
-        .action_modifiers_flags
-        .set_disable_floating_gauge_display(false);
+fn prepare_revenant_debug_soul(address: u64) {
+    prepare_revenant_passive_buddy(address);
+    // SAFETY: Exact native action word and exclusive full graph are retained by this callback.
+    if let Err(error) = unsafe { native_character::floating_gauge(address, false) } {
+        eprintln!("ShikiFSRS HUD debug gauge request rejected; actual receipt retained: {error}");
+    }
 }
 
-fn request_revenant_debug_soul_animation(chr: &mut ChrIns, anim_id: i32) {
-    chr.modules.as_mut().event.as_mut().request_animation_id = anim_id;
+fn request_revenant_debug_soul_animation(address: u64, anim_id: i32) {
+    // SAFETY: The selected debug-soul callback retains the complete animation/event graph.
+    if let Err(error) = unsafe { native_character::request_animation(address, anim_id) } {
+        eprintln!("ShikiFSRS HUD soul animation failed or uncertain; record retained: {error}");
+    }
 }
 
-fn release_revenant_debug_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantDebugSoul) {
+fn release_revenant_debug_soul(world_chr_man: &mut HudWorld, soul: &RevenantDebugSoul) {
     let Some(handle) = soul.handle else {
         return;
     };
@@ -3650,379 +4049,391 @@ fn release_revenant_debug_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantD
         return;
     };
 
-    let data = chr.modules.as_mut().data.as_mut();
-    data.hp = 0;
-    chr.chr_flags1c5.set_death_flag(true);
-    chr.chr_flags1c5.set_enable_render(false);
-    chr.chr_flags1c8.set_is_active(false);
-    update_runtime_chr_debug_flags(
-        chr,
-        CHR_DEBUG_FORCE_UNLOADED
-            | CHR_DEBUG_CHARACTER_DISABLED
-            | CHR_DEBUG_DISABLED_UPDATES
-            | CHR_DEBUG_DISABLED_HIT
-            | CHR_DEBUG_DISABLED_MOVEMENT
-            | CHR_DEBUG_DISABLED_SECONDARY_ACTIONS,
-        CHR_DEBUG_FORCE_LOADED,
-    );
-    chr.base_transparency = 0.0;
-    chr.base_transparency_modifier = 0.0;
-    chr.tint_alpha_multiplier = 0.0;
-    chr.tint_alpha_multiplier_modifier = 0.0;
+    // SAFETY: Actual retirement owns the experimental writable character/vital graph.
+    if let Err(error) = unsafe {
+        native_vitals::change(
+            chr.address,
+            shikifsrs_elden_ring::character_vitals::CharacterVital::Hp,
+            native_vitals::VitalChange::Value(0),
+        )
+    } {
+        eprintln!(
+            "ShikiFSRS HUD soul health retirement failed or uncertain; receipt retained: {error}"
+        );
+        return;
+    }
+    // SAFETY: This callback retains the experimental exclusive native character graph.
+    if let Err(error) =
+        unsafe { native_character::set_presentation_marks(chr.address, true, false, false) }
+    {
+        eprintln!("ShikiFSRS HUD presentation marks failed or uncertain; record retained: {error}");
+        return;
+    }
+    // SAFETY: Original selected retirement callback retains exact native writable bytes/graph.
+    if let Err(error) = unsafe {
+        native_character::update_debug_requests(
+            chr.address,
+            CHR_DEBUG_FORCE_UNLOADED
+                | CHR_DEBUG_CHARACTER_DISABLED
+                | CHR_DEBUG_DISABLED_UPDATES
+                | CHR_DEBUG_DISABLED_HIT
+                | CHR_DEBUG_DISABLED_MOVEMENT
+                | CHR_DEBUG_DISABLED_SECONDARY_ACTIONS,
+            CHR_DEBUG_FORCE_LOADED,
+        )
+    } {
+        eprintln!("ShikiFSRS HUD soul retirement request failed; records retained: {error}");
+        return;
+    }
+    // SAFETY: This callback retains the experimental exclusive native character graph.
+    if let Err(error) = unsafe { native_character::opacity(chr.address, false) } {
+        eprintln!("ShikiFSRS HUD opacity writes failed or uncertain; record retained: {error}");
+    }
 }
 
-fn release_revenant_passive_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantConvertedSoul) {
+fn release_revenant_passive_soul(world_chr_man: &mut HudWorld, soul: &RevenantConvertedSoul) {
     clear_revenant_passive_buddy_slot(soul.buddy_param_id);
 
-    if let Some(group) = revenant_buddy_group_by_param_id_mut(world_chr_man, soul.buddy_param_id) {
-        let data = group.chr.modules.as_mut().data.as_mut();
-        data.hp = 0;
-        group.chr.chr_flags1c5.set_death_flag(true);
-        group.chr.chr_flags1c5.set_enable_render(false);
-        group.chr.chr_flags1c8.set_is_active(false);
-        update_runtime_chr_debug_flags(
-            group.chr,
-            CHR_DEBUG_FORCE_UNLOADED | CHR_DEBUG_CHARACTER_DISABLED | CHR_DEBUG_DISABLED_UPDATES,
-            CHR_DEBUG_FORCE_LOADED,
-        );
-    } else if let Some(handle) = soul.handle {
-        if let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
-            let data = chr.modules.as_mut().data.as_mut();
-            data.hp = 0;
-            chr.chr_flags1c5.set_death_flag(true);
-            chr.chr_flags1c5.set_enable_render(false);
-            chr.chr_flags1c8.set_is_active(false);
-            update_runtime_chr_debug_flags(
-                chr,
+    if let Some(group) = revenant_buddy_group_by_param_id(world_chr_man, soul.buddy_param_id) {
+        // SAFETY: This callback retains the experimental exclusive buddy graph.
+        if let Err(error) = unsafe {
+            native_vitals::change(
+                group.character.address,
+                shikifsrs_elden_ring::character_vitals::CharacterVital::Hp,
+                native_vitals::VitalChange::Value(0),
+            )
+        } {
+            eprintln!(
+                "ShikiFSRS HUD buddy health retirement failed or uncertain; receipt retained: {error}"
+            );
+            return;
+        }
+        // SAFETY: This callback retains the experimental exclusive native character graph.
+        if let Err(error) = unsafe {
+            native_character::set_presentation_marks(group.character.address, true, false, false)
+        } {
+            eprintln!(
+                "ShikiFSRS HUD presentation marks failed or uncertain; record retained: {error}"
+            );
+            return;
+        }
+        // SAFETY: Retain selected initialized writable debug bytes and exact full graph.
+        if let Err(error) = unsafe {
+            native_character::update_debug_requests(
+                group.character.address,
                 CHR_DEBUG_FORCE_UNLOADED
                     | CHR_DEBUG_CHARACTER_DISABLED
                     | CHR_DEBUG_DISABLED_UPDATES,
                 CHR_DEBUG_FORCE_LOADED,
-            );
+            )
+        } {
+            eprintln!("ShikiFSRS HUD buddy retirement stores rejected; records retained: {error}");
         }
-    }
+    } else if let Some(handle) = soul.handle
+        && let Some(chr) = revenant_buddy_chr_by_handle_mut(world_chr_man, handle) {
+            // SAFETY: This callback retains the same experimental exclusive native graph.
+            if let Err(error) = unsafe {
+                native_vitals::change(
+                    chr.address,
+                    shikifsrs_elden_ring::character_vitals::CharacterVital::Hp,
+                    native_vitals::VitalChange::Value(0),
+                )
+            } {
+                eprintln!(
+                    "ShikiFSRS HUD handle health retirement failed or uncertain; receipt retained: {error}"
+                );
+                return;
+            }
+            // SAFETY: This callback retains the experimental exclusive native character graph.
+            if let Err(error) =
+                unsafe { native_character::set_presentation_marks(chr.address, true, false, false) }
+            {
+                eprintln!(
+                    "ShikiFSRS HUD presentation marks failed or uncertain; record retained: {error}"
+                );
+                return;
+            }
+            // SAFETY: Same exact initialized writable debug bytes and retained full graph.
+            if let Err(error) = unsafe {
+                native_character::update_debug_requests(
+                    chr.address,
+                    CHR_DEBUG_FORCE_UNLOADED
+                        | CHR_DEBUG_CHARACTER_DISABLED
+                        | CHR_DEBUG_DISABLED_UPDATES,
+                    CHR_DEBUG_FORCE_LOADED,
+                )
+            } {
+                eprintln!(
+                    "ShikiFSRS HUD retirement debug stores rejected; records retained: {error}"
+                );
+            }
+        }
 }
 
 fn clear_revenant_passive_buddy_slot(buddy_param_id: u32) {
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance_mut() }) else {
-        return;
-    };
-    let Some(row) = param_repository.get_mut::<BuddyParam>(buddy_param_id) else {
-        return;
-    };
-    row.set_npc_param_id(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-    row.set_npc_think_param_id(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-    row.set_npc_param_id_ridden(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-    row.set_npc_think_param_id_ridden(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
+    if let Err(error) = native_parameters::write_fields(
+        buddy_param_id,
+        &native_parameters::buddy_fields(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID),
+    ) {
+        append_damage_log(&format!(
+            "Buddy release failed or uncertain; owner retained: {error}"
+        ));
+    }
 }
 
 fn hide_revenant_native_summon_hud_if_revenant() {
-    let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
-        return;
-    };
-    let active_effects = {
-        let Some(player) = world_chr_man.main_player.as_ref() else {
+    let player = match native_world::primary_selection() {
+        Ok(Some(selection)) => selection.player,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD summon-HUD primary selection rejected: {error}");
             return;
-        };
-        player
-            .chr_ins
-            .special_effect
-            .entries()
-            .map(|entry| entry.param_id)
-            .collect::<Vec<_>>()
+        }
+    };
+    let active_effects = match native_character::effects(player.address) {
+        Ok(effects) => effects,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD summon-HUD role observation rejected: {error}");
+            return;
+        }
     };
     if active_role_from_effects(&active_effects) != Some(Role::Revenant) {
         return;
     }
-
-    let revenant_buddy_handles = revenant_alive_buddy_handles(world_chr_man);
-    suppress_revenant_buddy_floating_gauges(world_chr_man);
-    hide_revenant_native_summon_hud(&revenant_buddy_handles);
-}
-
-fn suppress_revenant_buddy_floating_gauges(world_chr_man: &mut WorldChrMan) {
-    for group in world_chr_man
-        .summon_buddy_manager
-        .groups
-        .iter()
-        .flat_map(|entry| entry.second.iter())
-    {
-        if !REVENANT_BUDDY_PARAM_IDS.contains(&(group.buddy_param_id as u32)) {
-            continue;
-        }
-
-        let chr = unsafe { &mut *group.chr_ins.as_ptr() };
-        if chr.field_ins_handle.is_empty() {
-            continue;
-        }
-
-        chr.modules
-            .action_flag
-            .action_modifiers_flags
-            .set_disable_floating_gauge_display(true);
-    }
-}
-
-fn hide_revenant_native_summon_hud(revenant_buddy_handles: &[FieldInsHandle]) {
-    let Ok(fe_man) = (unsafe { CSFeManImp::instance_mut() }) else {
+    if let Err(error) = native_world::revalidate(player) {
+        eprintln!("ShikiFSRS HUD summon-HUD player changed: {error}");
         return;
+    }
+    let handles = revenant_alive_buddy_handles_at(player.world_address);
+    suppress_revenant_buddy_floating_gauges(player.world_address);
+    hide_revenant_native_summon_hud(&handles);
+}
+
+fn suppress_revenant_buddy_floating_gauges(world: u64) {
+    let snapshot = match native_buddy::groups(world) {
+        Ok(Some(value)) => value,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD gauge buddy graph rejected: {error}");
+            return;
+        }
     };
-
-    hide_revenant_summon_msg(&mut fe_man.summon_msg_queue.current);
-    for entry in &mut fe_man.summon_msg_queue.list.data {
-        hide_revenant_summon_msg(&mut entry.data);
-    }
-    hide_revenant_summon_msg(&mut fe_man.summon_msg_queue.list.head.data);
-    fe_man.frontend_values.summoned_spirit_ash_count = 0;
-    for display in &mut fe_man.frontend_values.spirit_ash_display {
-        display.suppress();
-    }
-    for display in &mut fe_man.friendly_chr_tag_displays {
-        if revenant_friend_tag_should_hide(
-            display.field_ins_handle,
-            display.role_name_color,
-            display.is_down_scaled,
-            display.is_debug_summon,
-            revenant_buddy_handles,
-        ) {
-            display.is_visible = false;
-            display.is_not_on_screen = false;
-            display.field_ins_handle = FieldInsHandle::none();
-            display.hp = 0;
-            display.max_recoverable_hp = 0;
-            display.max_hp = 0;
-            display.hp_max_uncapped = 0;
-            display.last_damage_time_delta = 999.0;
+    for member in snapshot.groups.iter().flat_map(|group| &group.members) {
+        if !REVENANT_BUDDY_PARAM_IDS.contains(&(member.buddy_param_id as u32)) {
+            continue;
+        }
+        let Some(target) = member.character else {
+            continue;
+        };
+        if HudHandle::from_native(target.native_identifier).is_empty() {
+            continue;
+        }
+        if let Err(error) = native_world::revalidate(target) {
+            eprintln!("ShikiFSRS HUD gauge buddy identity rejected: {error}");
+            return;
+        }
+        // SAFETY: Caller retains original initialized word and exact full exclusive graph.
+        if let Err(error) = unsafe { native_character::floating_gauge(target.address, true) } {
+            eprintln!("ShikiFSRS HUD gauge store rejected; actual receipt retained: {error}");
+            return;
         }
     }
+}
 
-    let front_end_values = unsafe { fe_man.front_end_view.front_end_view_values.as_mut() };
-    front_end_values.summoned_spirit_ash_count = 0;
-    for display in &mut front_end_values.spirit_ash_display {
-        display.suppress();
-    }
-    for display in &mut fe_man.frontend_values.friendly_chr_tag_data {
-        hide_revenant_frontend_tag(display, revenant_buddy_handles);
-    }
-    for display in &mut front_end_values.friendly_chr_tag_data {
-        hide_revenant_frontend_tag(display, revenant_buddy_handles);
+fn hide_revenant_native_summon_hud(revenant_buddy_handles: &[HudHandle]) {
+    let handles: Vec<u64> = revenant_buddy_handles
+        .iter()
+        .map(|handle| {
+            // Transitional owned value conversion only; never a native object or invented layout.
+            handle.raw()
+        })
+        .collect();
+    // SAFETY: Actual callback must provide the experimental exclusive frontend graph lifetime.
+    if let Err(error) = unsafe { native_hud::suppress(&handles) } {
+        eprintln!("Shiki revenant native HUD: {error}");
     }
 }
 
-fn hide_revenant_frontend_tag(display: &mut eldenring::cs::TagHudData, handles: &[FieldInsHandle]) {
-    if !revenant_friend_tag_should_hide(
-        display.field_ins_handle,
-        display.role_name_color,
-        display.is_down_scaled,
-        false,
-        handles,
+fn revenant_alive_buddy_handles(world: &HudWorld) -> Vec<HudHandle> {
+    revenant_alive_buddy_handles_at(world.object.address)
+}
+
+fn revenant_alive_buddy_handles_at(world: u64) -> Vec<HudHandle> {
+    let mut handles = revenant_buddy_group_handles_at(world);
+    let members = match native_world::collection(
+        world,
+        shikifsrs_elden_ring::character_sets::WorldCollectionSelection::Embedded10f90,
     ) {
-        return;
-    }
-
-    display.is_visible = false;
-    display.update_position = false;
-    display.is_not_on_screen = false;
-    display.field_ins_handle = FieldInsHandle::none();
-    display.hp = 0;
-    display.hp_max_uncapped_difference = 0;
-    display.hp_max_uncapped = 0;
-    display.last_damage_taken = 0;
-    display.last_hp_value = 0;
-}
-
-fn revenant_friend_tag_should_hide(
-    handle: FieldInsHandle,
-    role_name_color: u8,
-    is_down_scaled: bool,
-    _is_debug_summon: bool,
-    handles: &[FieldInsHandle],
-) -> bool {
-    handles.iter().any(|known| *known == handle)
-        || role_name_color == 1
-        || is_down_scaled
-}
-
-fn hide_revenant_summon_msg(message: &mut eldenring::cs::SummonMsgData) {
-    message.suppress();
-}
-
-fn revenant_alive_buddy_handles(world_chr_man: &WorldChrMan) -> Vec<FieldInsHandle> {
-    let mut handles = revenant_buddy_group_handles(world_chr_man);
-    for handle in world_chr_man
-        .summon_buddy_chr_set
-        .characters()
-        .filter(|chr| revenant_buddy_hp_ratio(chr).is_some())
-        .map(|chr| chr.field_ins_handle)
-    {
-        if !handles.iter().any(|known| known == &handle) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD alive-buddy collection rejected: {error}");
+            return handles;
+        }
+    };
+    for target in members {
+        if revenant_buddy_hp_ratio_identity(target).is_none() {
+            continue;
+        }
+        let handle = HudHandle::from_native(target.native_identifier);
+        if !handles.contains(&handle) {
             handles.push(handle);
         }
     }
     handles
 }
 
-fn revenant_buddy_group_handles(world_chr_man: &WorldChrMan) -> Vec<FieldInsHandle> {
-    world_chr_man
-        .summon_buddy_manager
-        .groups
-        .iter()
-        .flat_map(|entry| entry.second.iter())
-        .filter_map(|group| {
-            let chr = unsafe { group.chr_ins.as_ref() };
-            if chr.field_ins_handle.is_empty() {
-                None
-            } else {
-                Some(chr.field_ins_handle)
-            }
-        })
-        .collect()
+fn revenant_buddy_group_handles(world: &HudWorld) -> Vec<HudHandle> {
+    revenant_buddy_group_handles_at(world.object.address)
+}
+
+fn revenant_buddy_group_handles_at(world: u64) -> Vec<HudHandle> {
+    match native_buddy::groups(world) {
+        Ok(Some(snapshot)) => native_buddy::identities(&snapshot)
+            .into_iter()
+            .map(|target| HudHandle::from_native(target.native_identifier))
+            .collect(),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD buddy graph copy rejected: {error}");
+            Vec::new()
+        }
+    }
 }
 
 fn revenant_buddy_hp_ratio_by_slot(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     index: usize,
-    handle: Option<FieldInsHandle>,
+    handle: Option<HudHandle>,
 ) -> Option<f32> {
-    revenant_buddy_chr_by_param_id(world_chr_man, REVENANT_BUDDY_PARAM_IDS[index])
-        .and_then(revenant_buddy_hp_ratio)
-        .or_else(|| handle.and_then(|handle| revenant_buddy_hp_ratio_by_handle(world_chr_man, handle)))
-}
-
-fn revenant_buddy_chr_by_param_id(
-    world_chr_man: &WorldChrMan,
-    buddy_param_id: u32,
-) -> Option<&ChrIns> {
-    world_chr_man
-        .summon_buddy_manager
-        .groups
-        .iter()
-        .flat_map(|entry| entry.second.iter())
-        .find_map(|group| {
-            if group.buddy_param_id != buddy_param_id as i32 {
-                return None;
-            }
-            let chr = unsafe { group.chr_ins.as_ref() };
-            if chr.field_ins_handle.is_empty() {
-                None
-            } else {
-                Some(chr)
-            }
+    revenant_buddy_group_by_param_id(world_chr_man, REVENANT_BUDDY_PARAM_IDS[index])
+        .and_then(|group| revenant_buddy_hp_ratio_identity(group.character))
+        .or_else(|| {
+            handle.and_then(|handle| revenant_buddy_hp_ratio_by_handle(world_chr_man, handle))
         })
 }
 
-struct RevenantBuddyGroupChrMut<'a> {
-    chr: &'a mut ChrIns,
-    disappear_requested: bool,
+struct RevenantBuddyGroupCharacter {
+    character: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+    retirement_requested: bool,
 }
-
-fn revenant_buddy_group_by_param_id_mut(
-    world_chr_man: &mut WorldChrMan,
+fn revenant_buddy_group_by_param_id(
+    world_chr_man: &HudWorld,
     buddy_param_id: u32,
-) -> Option<RevenantBuddyGroupChrMut<'_>> {
-    world_chr_man
-        .summon_buddy_manager
-        .groups
-        .iter()
-        .flat_map(|entry| entry.second.iter())
-        .find_map(|group| {
-            if group.buddy_param_id != buddy_param_id as i32 {
-                return None;
-            }
-            let chr = unsafe { &mut *group.chr_ins.as_ptr() };
-            if chr.field_ins_handle.is_empty() {
-                None
-            } else {
-                Some(RevenantBuddyGroupChrMut {
-                    chr,
-                    disappear_requested: group.disappear_requested,
-                })
-            }
-        })
+) -> Option<RevenantBuddyGroupCharacter> {
+    let snapshot = native_buddy::groups(world_chr_man.object.address)
+        .map_err(|error| eprintln!("ShikiFSRS HUD buddy graph rejected: {error}"))
+        .ok()??;
+    let member = native_buddy::by_param_id(&snapshot, buddy_param_id)?;
+    let character = member.character?;
+    native_world::revalidate(character)
+        .map_err(|error| eprintln!("ShikiFSRS HUD buddy identity changed: {error}"))
+        .ok()?;
+    Some(RevenantBuddyGroupCharacter {
+        character,
+        retirement_requested: member.inactive_request_byte != 0,
+    })
 }
 
 fn revenant_buddy_chr_by_handle_mut(
-    world_chr_man: &mut WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<&mut ChrIns> {
-    let chr_ptr = world_chr_man
-        .summon_buddy_chr_set
-        .chr_ins_by_handle_mut(&handle)
-        .map(|chr| chr as *mut ChrIns)
-        .or_else(|| {
-            world_chr_man
-                .chr_ins_by_handle_mut(&handle)
-                .map(|chr| chr as *mut ChrIns)
-        })?;
-    Some(unsafe { &mut *chr_ptr })
+    world: &mut HudWorld,
+    handle: HudHandle,
+) -> Option<shikifsrs_elden_ring::character_sets::CharacterIdentity> {
+    revenant_buddy_chr_by_handle(world, handle)
 }
 
 fn revenant_buddy_chr_by_handle(
-    world_chr_man: &WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<&ChrIns> {
-    world_chr_man
-        .summon_buddy_chr_set
-        .chr_ins_by_handle(&handle)
-        .or_else(|| world_chr_man.chr_ins_by_handle(&handle))
+    world: &HudWorld,
+    handle: HudHandle,
+) -> Option<shikifsrs_elden_ring::character_sets::CharacterIdentity> {
+    let world = world.object.address;
+    let members = match native_world::collection(
+        world,
+        shikifsrs_elden_ring::character_sets::WorldCollectionSelection::Embedded10f90,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD buddy collection rejected: {error}");
+            return None;
+        }
+    };
+    if let Some(target) = members
+        .into_iter()
+        .find(|member| member.native_identifier == handle.raw())
+    {
+        return Some(target);
+    }
+    // SAFETY: The callback retains the exact full world/area/character graph and exclusive phase.
+    unsafe { native_world::resolve(world, handle.raw()) }
+        .map_err(|error| {
+            eprintln!("ShikiFSRS HUD buddy lookup rejected; actual attempt retained: {error}")
+        })
+        .ok()
+        .flatten()
 }
 
 fn revenant_debug_chr_by_handle_mut(
-    world_chr_man: &mut WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<&mut ChrIns> {
-    let chr_ptr = world_chr_man
-        .debug_chr_set
-        .chr_ins_by_handle_mut(&handle)
-        .map(|chr| chr as *mut ChrIns)
-        .or_else(|| {
-            world_chr_man
-                .chr_ins_by_handle_mut(&handle)
-                .map(|chr| chr as *mut ChrIns)
-        })?;
-    Some(unsafe { &mut *chr_ptr })
+    world: &mut HudWorld,
+    handle: HudHandle,
+) -> Option<shikifsrs_elden_ring::character_sets::CharacterIdentity> {
+    revenant_debug_chr_by_handle(world, handle)
 }
-
 fn revenant_debug_chr_by_handle(
-    world_chr_man: &WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<&ChrIns> {
-    world_chr_man
-        .debug_chr_set
-        .chr_ins_by_handle(&handle)
-        .or_else(|| world_chr_man.chr_ins_by_handle(&handle))
+    world: &HudWorld,
+    handle: HudHandle,
+) -> Option<shikifsrs_elden_ring::character_sets::CharacterIdentity> {
+    let world = world.object.address;
+    match native_creation::owned_by_handle(world, handle.raw()) {
+        Ok(Some(character)) => Some(character),
+        Ok(None) => {
+            // SAFETY: Forward the same complete retained world/area graph and native callback phase.
+            unsafe { native_world::resolve(world, handle.raw()) }
+                .map_err(|error| {
+                    eprintln!("ShikiFSRS HUD debug lookup failed; receipt retained: {error}")
+                })
+                .ok()
+                .flatten()
+        }
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD debug registration superseded: {error}");
+            None
+        }
+    }
 }
 
-fn apply_revenant_buddy_hp_ratio(chr: &mut ChrIns, hp_ratio: f32) {
-    let data = chr.modules.as_mut().data.as_mut();
-    let max_hp = data.max_hp.max(1);
-    data.hp = ((max_hp as f32) * hp_ratio.clamp(0.0, 1.0))
-        .round()
-        .clamp(0.0, max_hp as f32) as i32;
+fn apply_revenant_buddy_hp_ratio_address(address: u64, hp_ratio: f32) {
+    // SAFETY: Actual callback supplies the exact writable native HP destination and lifetime.
+    if let Err(error) = unsafe {
+        native_vitals::change(
+            address,
+            shikifsrs_elden_ring::character_vitals::CharacterVital::Hp,
+            native_vitals::VitalChange::Fraction(hp_ratio),
+        )
+    } {
+        append_damage_log(&format!(
+            "Buddy HP ratio rejected or uncertain; receipt retained: {error}"
+        ));
+    }
 }
 
 fn revenant_buddy_param_npc_ids() -> [Option<i32>; REVENANT_SUMMON_COUNT] {
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance() }) else {
-        return [None; REVENANT_SUMMON_COUNT];
-    };
-
-    let mut npc_ids = [None; REVENANT_SUMMON_COUNT];
-    for (index, param_id) in REVENANT_BUDDY_PARAM_IDS.into_iter().enumerate() {
-        npc_ids[index] = param_repository
-            .get::<BuddyParam>(param_id)
-            .map(|row| row.npc_param_id())
-            .filter(|npc_id| *npc_id > 0);
-    }
-    npc_ids
+    use shikifsrs_elden_ring::parameter_fields::{ParameterField as F, ScalarValue as V};
+    REVENANT_BUDDY_PARAM_IDS.map(|id| match native_parameters::read_field(F::BuddyNpc, id) {
+        Ok(Some(V::I32(value))) if value > 0 => Some(value),
+        Ok(_) => None,
+        Err(error) => {
+            append_damage_log(&format!("Buddy NPC read rejected: {error}"));
+            None
+        }
+    })
 }
 
 fn revenant_find_new_buddy_handle(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     target_npc_id: Option<i32>,
-    current_handles: &[FieldInsHandle],
-    baseline: &[FieldInsHandle],
-    handles: &[Option<FieldInsHandle>; REVENANT_SUMMON_COUNT],
-) -> Option<FieldInsHandle> {
+    current_handles: &[HudHandle],
+    baseline: &[HudHandle],
+    handles: &[Option<HudHandle>; REVENANT_SUMMON_COUNT],
+) -> Option<HudHandle> {
     if let Some(handle) =
         revenant_find_matching_buddy_handle(world_chr_man, current_handles, target_npc_id, handles)
     {
@@ -4037,16 +4448,21 @@ fn revenant_find_new_buddy_handle(
                 && !handles.iter().flatten().any(|known| known == handle)
         })
         .or_else(|| {
-            revenant_find_untracked_buddy_handle(world_chr_man, target_npc_id, current_handles, handles)
+            revenant_find_untracked_buddy_handle(
+                world_chr_man,
+                target_npc_id,
+                current_handles,
+                handles,
+            )
         })
 }
 
 fn revenant_find_untracked_buddy_handle(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     target_npc_id: Option<i32>,
-    current_handles: &[FieldInsHandle],
-    handles: &[Option<FieldInsHandle>; REVENANT_SUMMON_COUNT],
-) -> Option<FieldInsHandle> {
+    current_handles: &[HudHandle],
+    handles: &[Option<HudHandle>; REVENANT_SUMMON_COUNT],
+) -> Option<HudHandle> {
     if let Some(handle) =
         revenant_find_matching_buddy_handle(world_chr_man, current_handles, target_npc_id, handles)
     {
@@ -4061,35 +4477,31 @@ fn revenant_find_untracked_buddy_handle(
 }
 
 fn revenant_find_matching_buddy_handle(
-    world_chr_man: &WorldChrMan,
-    current_handles: &[FieldInsHandle],
+    world: &HudWorld,
+    current_handles: &[HudHandle],
     target_npc_id: Option<i32>,
-    handles: &[Option<FieldInsHandle>; REVENANT_SUMMON_COUNT],
-) -> Option<FieldInsHandle> {
-    let target_npc_id = target_npc_id?;
-    current_handles
-        .iter()
-        .copied()
-        .find(|handle| {
-            !handles.iter().flatten().any(|known| known == handle)
-                && world_chr_man
-                    .summon_buddy_chr_set
-                    .chr_ins_by_handle(&handle)
-                    .or_else(|| world_chr_man.chr_ins_by_handle(&handle))
-                    .is_some_and(|chr| chr.npc_id == target_npc_id)
-        })
+    handles: &[Option<HudHandle>; REVENANT_SUMMON_COUNT],
+) -> Option<HudHandle> {
+    let expected = target_npc_id?;
+    current_handles.iter().copied().find(|handle| {
+        if handles.iter().flatten().any(|known| known == handle) {
+            return false;
+        }
+        let Some(target) = revenant_buddy_chr_by_handle(world, *handle) else {
+            return false;
+        };
+        native_character::initializer_word(
+            target.address,
+            shikifsrs_elden_ring::character_parameters::CharacterInitializerWord::ResourceNumber,
+        )
+        .map_err(|error| eprintln!("ShikiFSRS HUD buddy resource-number rejected: {error}"))
+        .is_ok_and(|value| value == Some(expected))
+    })
 }
 
-fn revenant_buddy_hp_ratio_by_handle(
-    world_chr_man: &WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<f32> {
+fn revenant_buddy_hp_ratio_by_handle(world: &HudWorld, handle: HudHandle) -> Option<f32> {
     revenant_buddy_hp_ratio_from_fe(handle).or_else(|| {
-        world_chr_man
-            .summon_buddy_chr_set
-            .chr_ins_by_handle(&handle)
-            .and_then(revenant_buddy_hp_ratio)
-            .or_else(|| world_chr_man.chr_ins_by_handle(&handle).and_then(revenant_buddy_hp_ratio))
+        revenant_buddy_chr_by_handle(world, handle).and_then(revenant_buddy_hp_ratio_identity)
     })
 }
 
@@ -4105,108 +4517,83 @@ fn revenant_active_effect_index(
     Some(index)
 }
 
-fn revenant_buddy_hp_ratio_from_fe(handle: FieldInsHandle) -> Option<f32> {
+fn revenant_buddy_hp_ratio_from_fe(handle: HudHandle) -> Option<f32> {
     if handle.is_empty() {
         return None;
     }
-
-    let fe_man = unsafe { CSFeManImp::instance() }.ok()?;
-    for display in &fe_man.frontend_values.spirit_ash_display {
-        if display.field_ins_handle == handle {
-            return hp_ratio_from_u32(display.hp, display.hp_max_uncapped);
-        }
-    }
-
-    for display in &fe_man.friendly_chr_tag_displays {
-        if display.field_ins_handle == handle {
-            return hp_ratio_from_u32(display.hp, display.max_hp.max(display.hp_max_uncapped));
-        }
-    }
-
-    fe_man
-        .frontend_values
-        .friendly_chr_tag_data
-        .iter()
-        .find(|display| display.field_ins_handle == handle)
-        .and_then(|display| hp_ratio_from_u32(display.hp, display.hp_max_uncapped))
-}
-
-fn hp_ratio_from_u32(hp: u32, max_hp: u32) -> Option<f32> {
-    if max_hp == 0 {
-        return None;
-    }
-    Some((hp as f32 / max_hp as f32).clamp(0.0, 1.0))
+    native_hud::buddy_hp_ratio(handle.raw()).unwrap_or_else(|error| {
+        eprintln!("ShikiFSRS HUD buddy gauge copy rejected: {error}");
+        None
+    })
 }
 
 fn collect_resurrection_accumulation_teammate_snapshots(
     snapshots: &mut Vec<TeammateResurrectionAccumulationSnapshot>,
-    world_chr_man: &WorldChrMan,
-    player_handle: FieldInsHandle,
+    world_chr_man: &HudWorld,
+    player_handle: HudHandle,
     player_team_type: u8,
-    player_position: HavokPosition,
+    player_position: HudPosition,
 ) {
-    snapshots.extend(world_chr_man.player_chr_set.characters().filter_map(|candidate| {
-            let chr = &candidate.chr_ins;
-            let friendly = resurrection_accumulation_teammate_is_friendly(
-                chr.chr_type,
-                chr.team_type,
-                player_team_type,
-            );
-            let runtime_visible = !runtime_chr_force_unloaded(chr)
-                && !runtime_chr_character_disabled(chr)
-                && !chr.load_state.backread_disabled();
-            if !resurrection_accumulation_teammate_should_display(
-                chr.field_ins_handle.is_empty(),
-                chr.field_ins_handle == player_handle,
-                friendly,
-                runtime_visible,
-                chr_has_speffect(chr, SP_RESURRECTION_ACCUMULATION_HUD),
-            ) {
-                return None;
-            }
+    let Ok(candidates) = native_world::collection(
+        world_chr_man.object.address,
+        shikifsrs_elden_ring::character_sets::WorldCollectionSelection::Players,
+    ) else {
+        return;
+    };
+    snapshots.extend(
+        candidates.into_iter().filter_map(|identity| {
+                let candidate = HudActor::observe(identity).ok()?;
+                let chr = &candidate;
+                let friendly = resurrection_accumulation_teammate_is_friendly(
+                    chr.raw_kind,
+                    chr.team,
+                    player_team_type,
+                );
+                let runtime_visible = !runtime_chr_force_unloaded(chr)
+                    && !runtime_chr_character_disabled(chr)
+                    && native_character::load_requests(chr.identity.address)
+                        .is_ok_and(|value| !value.backread_disabled_requested());
+                if !resurrection_accumulation_teammate_should_display(
+                    chr.handle.is_empty(),
+                    chr.handle == player_handle,
+                    friendly,
+                    runtime_visible,
+                    chr_has_speffect(chr, SP_RESURRECTION_ACCUMULATION_HUD),
+                ) {
+                    return None;
+                }
 
-            let super_armor = chr.modules.as_ref().super_armor.as_ref();
-            let screen_pos =
-                resurrection_accumulation_teammate_screen_pos(player_position, chr)?;
-            Some(TeammateResurrectionAccumulationSnapshot {
-                progress: normalized_super_armor(
-                    super_armor.sa_durability,
-                    super_armor.sa_durability_max,
-                ),
-                screen_pos,
-            })
-        }))
+                // SAFETY: Same exclusive native graph obligation as the owning HUD callback.
+                let (current, maximum) =
+                    unsafe { native_vitals::super_armor_values(chr.identity.address) }
+                        .map_err(|error| {
+                            eprintln!("ShikiFSRS HUD teammate posture query rejected: {error}")
+                        })
+                        .ok()?;
+                let screen_pos =
+                    resurrection_accumulation_teammate_screen_pos(player_position, chr)?;
+                Some(TeammateResurrectionAccumulationSnapshot {
+                    progress: normalized_super_armor(current, maximum),
+                    screen_pos,
+                })
+            }),
+    )
 }
 
 fn resurrection_accumulation_teammate_is_friendly(
-    chr_type: ChrType,
+    raw_kind: i32,
     candidate_team_type: u8,
     player_team_type: u8,
 ) -> bool {
-    if matches!(
-        chr_type,
-        ChrType::None
-            | ChrType::Duelist
-            | ChrType::Ghost
-            | ChrType::Ghost1
-            | ChrType::Npc
-            | ChrType::BloodstainGhost
-            | ChrType::BonfireGhost
-            | ChrType::MessageGhost
-            | ChrType::BloodyFinger
-            | ChrType::Recusant
-            | ChrType::FesteringBloodyFinger
-            | ChrType::WhiteSummonNpc
-            | ChrType::BloodyFingerNpc
-            | ChrType::RecusantNpc
-    ) {
-        return false;
-    }
-
-    matches!(
-        chr_type,
-        ChrType::Local | ChrType::WhitePhantom | ChrType::BluePhantom
-    ) || (player_team_type != 0 && candidate_team_type == player_team_type)
+    // Host/white/blue: independent ER EMEDF TargetType 0/1/17. The pinned TGA
+    // role metadata also labels 8/10/11/12/13 (hollow/transparent/invisible/
+    // dragon/arena). Only these ordinary non-invader kinds use same-team admission.
+    // Keep unnamed values closed; this consumer policy does not name SDK enum variants,
+    // prove a network role, or turn the cooperative NPC records into human teammates.
+    matches!(raw_kind, 0 | 1 | 17)
+        || (matches!(raw_kind, 8 | 10 | 11 | 12 | 13)
+            && player_team_type != 0
+            && candidate_team_type == player_team_type)
 }
 
 fn resurrection_accumulation_teammate_should_display(
@@ -4226,33 +4613,60 @@ fn normalized_super_armor(current: f32, maximum: f32) -> f32 {
     (current / maximum).clamp(0.0, 1.0)
 }
 
-fn revenant_buddy_hp_ratio(chr: &ChrIns) -> Option<f32> {
-    if chr.field_ins_handle.is_empty() {
+fn revenant_buddy_hp_ratio_identity(
+    target: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+) -> Option<f32> {
+    native_world::revalidate(target)
+        .map_err(|error| eprintln!("ShikiFSRS HUD buddy identity rejected: {error}"))
+        .ok()?;
+    let handle = HudHandle::from_native(target.native_identifier);
+    if handle.is_empty() {
         return None;
     }
-    revenant_buddy_hp_ratio_from_fe(chr.field_ins_handle).or_else(|| {
-        let data = chr.modules.as_ref().data.as_ref();
-        if data.max_hp <= 0 || data.hp < 0 {
+    revenant_buddy_hp_ratio_from_fe(handle).or_else(|| {
+        let data = native_vitals::observe(target.address)
+            .map_err(|error| eprintln!("ShikiFSRS HUD buddy vital copy rejected: {error}"))
+            .ok()?
+            .hp;
+        if data.maximum <= 0 || data.current < 0 {
             return None;
         }
-        Some((data.hp as f32 / data.max_hp as f32).clamp(0.0, 1.0))
+        Some((data.current as f32 / data.maximum as f32).clamp(0.0, 1.0))
     })
 }
-
 fn collect_scholar_links(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     config: &RoleConfig,
     active_effects: &[i32],
 ) -> Vec<ScholarLink> {
     let mut links = Vec::new();
-    if let Some(player) = world_chr_man.main_player.as_ref() {
-        if active_effects.contains(&config.effect(SP_SCHOLAR_SYMPATHY_SELF)) {
-            push_scholar_link(&mut links, &player.chr_ins, ScholarLinkKind::SelfLink);
+    if let Some(player) = world_chr_man.player
+        && active_effects.contains(&config.effect(SP_SCHOLAR_SYMPATHY_SELF)) {
+            push_scholar_link(&mut links, &player.actor, ScholarLinkKind::SelfLink);
         }
-    }
 
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
-        let chr = unsafe { entry.chr_ins.as_ref() };
+    let entries = match native_world::update_entries(world_chr_man.object.address) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+            return Vec::new();
+        }
+    };
+    for entry in entries {
+        if let Err(error) = native_world::revalidate(entry.character) {
+            eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+            return Vec::new();
+        }
+        // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+        // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+        let copied = match HudActor::observe(entry.character) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                return Vec::new();
+            }
+        };
+        let chr = &copied;
         if chr_data_hp(chr) <= 0 {
             continue;
         }
@@ -4271,15 +4685,15 @@ fn collect_scholar_links(
     links
 }
 
-fn push_scholar_link(links: &mut Vec<ScholarLink>, chr: &ChrIns, kind: ScholarLinkKind) {
-    if links.iter().any(|link| link.handle == chr.field_ins_handle) {
+fn push_scholar_link(links: &mut Vec<ScholarLink>, chr: &HudActor, kind: ScholarLinkKind) {
+    if links.iter().any(|link| link.handle == chr.handle) {
         return;
     }
     links.push(ScholarLink {
-        handle: chr.field_ins_handle,
+        handle: chr.handle,
         kind,
         hp: chr_data_hp(chr),
-        last_hit_by: (!chr.last_hit_by.is_empty()).then_some(chr.last_hit_by),
+        last_hit_by: (!chr.last_effect_source.is_empty()).then_some(chr.last_effect_source),
     });
 }
 
@@ -4288,22 +4702,20 @@ fn scholar_link_is_friendly(link: &ScholarLink) -> bool {
 }
 
 fn scholar_counter_attacker(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     links: &[ScholarLink],
-    victim: FieldInsHandle,
-    last_hit_by: Option<FieldInsHandle>,
-    locked_on_enemy: Option<FieldInsHandle>,
-) -> Option<FieldInsHandle> {
-    if let Some(attacker) = last_hit_by {
-        if scholar_linked_enemy(links, attacker) {
+    victim: HudHandle,
+    last_hit_by: Option<HudHandle>,
+    locked_on_enemy: Option<HudHandle>,
+) -> Option<HudHandle> {
+    if let Some(attacker) = last_hit_by
+        && scholar_linked_enemy(links, attacker) {
             return Some(attacker);
         }
-    }
-    if let Some(locked_on_enemy) = locked_on_enemy {
-        if scholar_linked_enemy(links, locked_on_enemy) {
+    if let Some(locked_on_enemy) = locked_on_enemy
+        && scholar_linked_enemy(links, locked_on_enemy) {
             return Some(locked_on_enemy);
         }
-    }
     if let Some(nearest) = scholar_nearest_linked_enemy(world_chr_man, links, victim) {
         return Some(nearest);
     }
@@ -4317,10 +4729,10 @@ fn scholar_counter_attacker(
 }
 
 fn scholar_nearest_linked_enemy(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     links: &[ScholarLink],
-    victim: FieldInsHandle,
-) -> Option<FieldInsHandle> {
+    victim: HudHandle,
+) -> Option<HudHandle> {
     let victim_pos = scholar_chr_position_by_handle(world_chr_man, victim)?;
     links
         .iter()
@@ -4333,21 +4745,30 @@ fn scholar_nearest_linked_enemy(
         .map(|(handle, _)| handle)
 }
 
-fn scholar_chr_position_by_handle(
-    world_chr_man: &WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<fromsoftware_shared::F32Vector4> {
-    if let Some(player) = world_chr_man.main_player.as_ref() {
-        if player.chr_ins.field_ins_handle == handle {
-            return Some(player.chr_ins.chr_ctrl.as_ref().model_matrix.3);
-        }
-    }
-    world_chr_man
-        .chr_ins_by_handle(&handle)
-        .map(|chr| chr.chr_ctrl.as_ref().model_matrix.3)
+fn hud_model_translation(address: u64) -> Option<native_camera::Vector4> {
+    let [x, y, z, w] = native_character::model_translation(address)
+        .map_err(|error| eprintln!("ShikiFSRS HUD model translation rejected: {error}"))
+        .ok()?
+        .map(f32::from_bits);
+    Some(native_camera::Vector4(x, y, z, w))
 }
 
-fn scholar_linked_enemy(links: &[ScholarLink], handle: FieldInsHandle) -> bool {
+fn scholar_chr_position_by_handle(
+    world_chr_man: &HudWorld,
+    handle: HudHandle,
+) -> Option<native_camera::Vector4> {
+    if let Some(player) = world_chr_man.player
+        && player.actor.handle == handle {
+            return hud_model_translation(player.actor.identity.address);
+        }
+    // SAFETY: This experimental HUD callback retains the full native lookup graph and phase.
+    let target = unsafe { native_world::resolve(world_chr_man.object.address, handle.raw()) }
+        .map_err(|error| eprintln!("ShikiFSRS HUD model target lookup rejected: {error}"))
+        .ok()??;
+    hud_model_translation(target.address)
+}
+
+fn scholar_linked_enemy(links: &[ScholarLink], handle: HudHandle) -> bool {
     links
         .iter()
         .any(|link| link.kind == ScholarLinkKind::Enemy && link.handle == handle)
@@ -4357,17 +4778,41 @@ fn scholar_scaled_amount(amount: i32, rate: f32) -> i32 {
     ((amount.max(0) as f32) * rate).floor() as i32
 }
 
-fn chr_has_speffect(chr: &ChrIns, sp_effect: i32) -> bool {
-    chr.special_effect
-        .entries()
-        .any(|entry| entry.param_id == sp_effect)
+fn chr_has_speffect(chr: &HudActor, sp_effect: i32) -> bool {
+    native_character::effects(chr.identity.address).map_or_else(
+        |error| {
+            eprintln!("ShikiFSRS HUD effect observation rejected: {error}");
+            false
+        },
+        |effects| effects.contains(&sp_effect),
+    )
 }
 
 fn wylder_hookshot_target_result(
-    world_chr_man: &WorldChrMan,
-) -> Option<(FieldInsHandle, WylderHookshotNativeResult)> {
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
-        let chr = unsafe { entry.chr_ins.as_ref() };
+    world_chr_man: &HudWorld,
+) -> Option<(HudHandle, WylderHookshotNativeResult)> {
+    let entries = match native_world::update_entries(world_chr_man.object.address) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD world candidates rejected: {error}");
+            return None;
+        }
+    };
+    for entry in entries {
+        if let Err(error) = native_world::revalidate(entry.character) {
+            eprintln!("ShikiFSRS HUD world candidate superseded: {error}");
+            return None;
+        }
+        // SAFETY: Transitional native view still relies on this callback’s full graph/phase contract.
+        // The copied full identity was rechecked; it grants no lease. Remaining fields are being ported.
+        let copied = match HudActor::observe(entry.character) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("ShikiFSRS HUD actor copy rejected: {error}");
+                return None;
+            }
+        };
+        let chr = &copied;
         let result = if chr_has_speffect(chr, SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED) {
             WylderHookshotNativeResult::PullEnemy
         } else if chr_has_speffect(chr, SP_WYLDER_HOOKSHOT_IMPACT_REJECTED) {
@@ -4375,95 +4820,114 @@ fn wylder_hookshot_target_result(
         } else {
             continue;
         };
-        return Some((chr.field_ins_handle, result));
+        return Some((chr.handle, result));
     }
     None
 }
 
 fn wylder_hookshot_destination_sample(
-    world_chr_man: &WorldChrMan,
+    world_chr_man: &HudWorld,
     destination: WylderHookshotMovementDestination,
-) -> Option<(HavokPosition, Option<WylderHookshotCapsule>)> {
+) -> Option<(HudPosition, Option<WylderHookshotCapsule>)> {
     match destination {
-        WylderHookshotMovementDestination::Enemy(handle) => world_chr_man
-            .chr_ins_by_handle(&handle)
-            .map(|target| {
+        WylderHookshotMovementDestination::Enemy(handle) => {
+            hud_actor_by_handle(world_chr_man, &handle).map(|target| {
                 (
-                    scholar_chr_physics_position(target),
-                    wylder_hookshot_chr_capsule(target),
+                    scholar_chr_physics_position(&target),
+                    wylder_hookshot_chr_capsule(&target),
                 )
-            }),
+            })
+        }
         WylderHookshotMovementDestination::Point(position) => Some((position, None)),
     }
 }
 
-fn clear_wylder_hookshot_player_outputs(world_chr_man: &mut WorldChrMan) {
-    let Some(player) = world_chr_man.main_player.as_mut() else {
+fn clear_wylder_hookshot_player_outputs(world_chr_man: &mut HudWorld) {
+    let Some(player) = world_chr_man.player.as_mut() else {
         return;
     };
     for output in [
         SP_WYLDER_HOOKSHOT_PULL_ENEMY,
         SP_WYLDER_HOOKSHOT_PULL_TO_ENEMY,
     ] {
-        player.chr_ins.remove_speffect(output);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, output) },
+        );
     }
 }
 
-fn chr_data_hp(chr: &ChrIns) -> i32 {
-    chr.modules.as_ref().data.as_ref().hp
+fn chr_data_hp(chr: &HudActor) -> i32 {
+    native_vitals::observe(chr.identity.address).map_or_else(
+        |error| {
+            eprintln!("ShikiFSRS HUD health observation rejected: {error}");
+            0
+        },
+        |vitals| vitals.hp.current,
+    )
 }
 
-fn duchess_replay_snapshot(chr: &ChrIns) -> DuchessReplaySnapshot {
+fn duchess_replay_snapshot(chr: &HudActor) -> DuchessReplaySnapshot {
     DuchessReplaySnapshot {
         hp: chr_data_hp(chr),
         status: duchess_resist_values(chr),
-        super_armor: chr.modules.as_ref().super_armor.as_ref().sa_durability,
+        super_armor: native_character::posture_current(chr.identity.address).unwrap_or_else(|error| {
+                eprintln!("ShikiFSRS HUD replay posture observation rejected: {error}");
+                0.0
+            }),
     }
 }
 
-fn duchess_resist_values(chr: &ChrIns) -> [i32; 7] {
-    let chr_ptr = chr as *const _ as usize;
-    let module_bag = unsafe { *((chr_ptr + CHR_MODULE_BAG_OFFSET) as *const usize) };
-    if module_bag == 0 {
-        return [0; 7];
-    }
-    let resist_module = unsafe { *((module_bag + MODULE_RESIST_OFFSET) as *const usize) };
-    if resist_module == 0 {
-        return [0; 7];
-    }
-
-    let mut values = [0; 7];
-    for (index, slot) in values.iter_mut().enumerate() {
-        let value = unsafe { *((resist_module + 0x10 + index * 4) as *const i32) };
-        *slot = if (0..1_000_000).contains(&value) {
-            value
-        } else {
-            0
-        };
-    }
-    values
+fn duchess_resist_values(chr: &HudActor) -> [i32; 7] {
+    native_character::resistance(chr.identity.address).map_or_else(
+        |error| {
+            eprintln!("ShikiFSRS HUD replay resistance observation rejected: {error}");
+            [0; 7]
+        },
+        |words| {
+            words.map(|value| {
+                if (0..1_000_000).contains(&value) {
+                    value
+                } else {
+                    0
+                }
+            })
+        },
+    )
 }
 
-fn hp_by_handle(world_chr_man: &WorldChrMan, handle: FieldInsHandle) -> Option<i32> {
-    if let Some(player) = world_chr_man.main_player.as_ref() {
-        if player.chr_ins.field_ins_handle == handle {
-            return Some(chr_data_hp(&player.chr_ins));
+fn hp_by_handle(world_chr_man: &HudWorld, handle: HudHandle) -> Option<i32> {
+    if let Some(player) = world_chr_man.player
+        && player.actor.handle == handle {
+            return Some(chr_data_hp(&player.actor));
         }
-    }
-    world_chr_man.chr_ins_by_handle(&handle).map(chr_data_hp)
+    // SAFETY: This experimental HUD callback retains the complete native lookup graph and phase.
+    let target = unsafe { native_world::resolve(world_chr_man.object.address, handle.raw()) }
+        .map_err(|error| eprintln!("ShikiFSRS HUD health target lookup rejected: {error}"))
+        .ok()??;
+    native_vitals::observe(target.address)
+        .map_err(|error| eprintln!("ShikiFSRS HUD health target observation rejected: {error}"))
+        .ok()
+        .map(|value| value.hp.current)
 }
 
-fn apply_scholar_sympathy_damage_speffect(
-    world_chr_man: &mut WorldChrMan,
-    handle: FieldInsHandle,
-) -> bool {
+fn apply_scholar_sympathy_damage_speffect(world_chr_man: &mut HudWorld, handle: HudHandle) -> bool {
     if handle.is_empty() {
         return false;
     }
-    let Some(target) = world_chr_man.chr_ins_by_handle_mut(&handle) else {
+    let Some(target) = hud_actor_by_handle(world_chr_man, &handle) else {
         return false;
     };
-    target.apply_speffect(SP_SCHOLAR_SYMPATHY_DAMAGE, true);
+    native_character::report_effect_result(
+        // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+        unsafe {
+            native_character::apply_effect(
+                target.identity.address,
+                SP_SCHOLAR_SYMPATHY_DAMAGE,
+                true,
+            )
+        },
+    );
     true
 }
 
@@ -4471,41 +4935,25 @@ fn set_scholar_sympathy_speffect_damage(damage: i32) -> bool {
     if damage <= 0 {
         return false;
     }
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance_mut() }) else {
-        return false;
-    };
-    let Some(sp_effect) =
-        param_repository.get_mut::<SpEffectParam>(SP_SCHOLAR_SYMPATHY_DAMAGE as u32)
-    else {
-        return false;
-    };
-    sp_effect.set_change_hp_point(damage);
-    true
+    native_parameters::write_fields(
+        SP_SCHOLAR_SYMPATHY_DAMAGE as u32,
+        &[(
+            shikifsrs_elden_ring::parameter_fields::ParameterField::EffectHpDelta,
+            shikifsrs_elden_ring::parameter_fields::ScalarValue::I32(damage),
+        )],
+    )
+    .is_ok()
 }
 
 fn set_duchess_replay_speffect(payload: DuchessReplayPayload) -> bool {
     if !payload.has_effect() {
         return false;
     }
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance_mut() }) else {
-        return false;
-    };
-    let Some(sp_effect) =
-        param_repository.get_mut::<SpEffectParam>(SP_DUCHESS_REPLAY_DAMAGE as u32)
-    else {
-        return false;
-    };
-    sp_effect.set_change_hp_point(payload.hp_damage.max(0));
-    sp_effect.set_poizon_attack_power(payload.status[0].max(0));
-    sp_effect.set_disease_attack_power(payload.status[1].max(0));
-    sp_effect.set_blood_attack_power(payload.status[2].max(0));
-    sp_effect.set_curse_attack_power(payload.status[3].max(0));
-    sp_effect.set_freeze_attack_power(payload.status[4].max(0));
-    sp_effect.set_sleep_attack_power(payload.status[5].max(0));
-    sp_effect.set_madness_attack_power(payload.status[6].max(0));
-    sp_effect.set_change_super_armor_point(0.0);
-    sp_effect.set_change_sa_point(0.0);
-    true
+    native_parameters::write_fields(
+        SP_DUCHESS_REPLAY_DAMAGE as u32,
+        &native_parameters::replay_fields(payload.hp_damage, payload.status),
+    )
+    .is_ok()
 }
 
 fn patch_revenant_buddy_stones_once() {
@@ -4515,65 +4963,67 @@ fn patch_revenant_buddy_stones_once() {
         return;
     }
 
-    let Ok(param_repository) = (unsafe { SoloParamRepository::instance_mut() }) else {
-        APPLIED.store(false, Ordering::Relaxed);
-        return;
-    };
-
-    let mut row_count = 0usize;
-    for (_, row) in param_repository.rows_mut::<BuddyStoneParam>() {
-        row.set_eliminate_target_entity_id(0);
-        row.set_summoned_event_flag_id(0);
-        row.set_overwrite_activate_region_entity_id(0);
-        row_count += 1;
-    }
-    for buddy_param_id in REVENANT_PASSIVE_BUDDY_PARAM_IDS {
-        if let Some(row) = param_repository.get_mut::<BuddyParam>(buddy_param_id) {
-            row.set_npc_param_id(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-            row.set_npc_think_param_id(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-            row.set_npc_param_id_ridden(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
-            row.set_npc_think_param_id_ridden(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID);
+    let result = (|| -> shikifsrs_runtime::Result<usize> {
+        let rows = native_parameters::stone_rows()?;
+        if rows.is_empty() {
+            return Err(shikifsrs_runtime::Error::NativeOperationRejected(
+                "BuddyStone table has no rows",
+            ));
+        }
+        for id in &rows {
+            native_parameters::write_fields(*id, &native_parameters::stone_fields())?;
+        }
+        for id in REVENANT_PASSIVE_BUDDY_PARAM_IDS {
+            if native_parameters::row_exists(
+                shikifsrs_elden_ring::parameter_fields::ParameterField::BuddyNpc,
+                id,
+            )? {
+                native_parameters::write_fields(
+                    id,
+                    &native_parameters::buddy_fields(REVENANT_PASSIVE_INVALID_BUDDY_NPC_ID),
+                )?;
+            }
+        }
+        Ok(rows.len())
+    })();
+    match result {
+        Ok(row_count) => append_damage_log(&format!(
+            "[revenant] patched BuddyStoneParam summon restriction fields rows={row_count}"
+        )),
+        Err(error) => {
+            APPLIED.store(false, Ordering::Relaxed);
+            append_damage_log(&format!("[revenant] retained parameter failure: {error}"));
         }
     }
+}
 
-    if row_count == 0 {
-        APPLIED.store(false, Ordering::Relaxed);
-        return;
+fn apply_duchess_replay_posture_damage(chr: &mut HudActor, payload: DuchessReplayPayload) {
+    // SAFETY: Actual callback must retain both exclusive live posture fields.
+    if let Err(error) = unsafe {
+        native_vitals::damage_posture(chr.identity.address, payload.super_armor_damage.max(0.0))
+    } {
+        append_damage_log(&format!(
+            "Replay posture change rejected or uncertain; receipt retained: {error}"
+        ));
     }
-
-    append_damage_log(&format!(
-        "[revenant] patched BuddyStoneParam summon restriction fields rows={row_count}"
-    ));
 }
 
-fn apply_duchess_replay_posture_damage(chr: &mut ChrIns, payload: DuchessReplayPayload) {
-    let damage = payload.super_armor_damage.max(0.0);
-    if damage <= 0.0 {
-        return;
-    }
-
-    let modules = chr.modules.as_mut();
-    let toughness = modules.toughness.as_mut();
-    toughness.toughness = (toughness.toughness - damage).max(0.0);
-
-    let super_armor = modules.super_armor.as_mut();
-    super_armor.sa_durability = (super_armor.sa_durability - damage).max(0.0);
+fn scholar_damage_number_pos(world_chr_man: &HudWorld, handle: HudHandle) -> Option<[f32; 2]> {
+    hud_actor_by_handle(world_chr_man, &handle).and_then(|actor| scholar_target_screen_pos(&actor))
 }
 
-fn scholar_damage_number_pos(
-    world_chr_man: &WorldChrMan,
-    handle: FieldInsHandle,
-) -> Option<[f32; 2]> {
-    world_chr_man
-        .chr_ins_by_handle(&handle)
-        .and_then(scholar_target_screen_pos)
-}
-
-fn fixed_fp_restore_for_player(world_chr_man: &WorldChrMan, accumulator: &mut f32) -> i32 {
-    let Some(player) = world_chr_man.main_player.as_ref() else {
+fn fixed_fp_restore_for_player(world_chr_man: &HudWorld, accumulator: &mut f32) -> i32 {
+    let Some(player) = world_chr_man.player else {
         return 0;
     };
-    let max_fp = player.chr_ins.modules.as_ref().data.as_ref().max_fp.max(1) as f32;
+    let vitals = match native_vitals::observe(player.actor.identity.address) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD FP restore vital copy rejected: {error}");
+            return 0;
+        }
+    };
+    let max_fp = vitals.mp.maximum.max(1) as f32;
     *accumulator += max_fp * RECLUSE_BLOOD_SOUL_FIXED_FP_RESTORE_RATE;
     let restore = accumulator.floor() as i32;
     if restore > 0 {
@@ -4582,74 +5032,92 @@ fn fixed_fp_restore_for_player(world_chr_man: &WorldChrMan, accumulator: &mut f3
     restore
 }
 
-fn apply_hp_delta_by_handle(
-    world_chr_man: &mut WorldChrMan,
-    handle: FieldInsHandle,
-    delta: i32,
-) -> i32 {
+fn apply_hp_delta_by_handle(world_chr_man: &mut HudWorld, handle: HudHandle, delta: i32) -> i32 {
     if delta == 0 {
         return 0;
     }
-    if let Some(player) = world_chr_man.main_player.as_mut() {
-        if player.chr_ins.field_ins_handle == handle {
-            return apply_chr_hp_delta(&mut player.chr_ins, delta);
+    if let Some(player) = world_chr_man.player.as_mut()
+        && player.actor.handle == handle {
+            return apply_chr_hp_delta(&mut player.actor, delta);
         }
-    }
-    world_chr_man
-        .chr_ins_by_handle_mut(&handle)
-        .map(|chr| apply_chr_hp_delta(chr, delta))
+    hud_actor_by_handle(world_chr_man, &handle)
+        .map(|mut chr| apply_chr_hp_delta(&mut chr, delta))
         .or_else(|| {
             revenant_buddy_chr_by_handle_mut(world_chr_man, handle)
-                .map(|chr| apply_chr_hp_delta(chr, delta))
+                .map(|chr| apply_chr_hp_delta_address(chr.address, delta))
         })
         .unwrap_or(0)
 }
 
-fn apply_chr_hp_delta(chr: &mut ChrIns, delta: i32) -> i32 {
-    let data = chr.modules.as_mut().data.as_mut();
-    let old_hp = data.hp;
-    let max_hp = data.max_hp.max(1);
-    let new_hp = old_hp.saturating_add(delta).clamp(0, max_hp);
-    data.hp = new_hp;
-    new_hp - old_hp
+fn apply_chr_hp_delta(chr: &mut HudActor, delta: i32) -> i32 {
+    apply_chr_hp_delta_address(chr.identity.address, delta)
 }
 
-fn apply_fp_delta_by_handle(
-    world_chr_man: &mut WorldChrMan,
-    handle: FieldInsHandle,
-    delta: i32,
-) -> i32 {
+fn apply_chr_hp_delta_address(address: u64, delta: i32) -> i32 {
+    // SAFETY: This existing callback requires stable exclusive native character/vital storage.
+    let result = unsafe {
+        native_vitals::change(
+            address,
+            shikifsrs_elden_ring::character_vitals::CharacterVital::Hp,
+            native_vitals::VitalChange::Delta(delta),
+        )
+    };
+    match result {
+        Ok(applied) => applied,
+        Err(error) => {
+            append_damage_log(&format!(
+                "HP change rejected or uncertain; receipt retained: {error}"
+            ));
+            0
+        }
+    }
+}
+
+fn apply_fp_delta_by_handle(world_chr_man: &mut HudWorld, handle: HudHandle, delta: i32) -> i32 {
     if delta == 0 {
         return 0;
     }
-    if let Some(player) = world_chr_man.main_player.as_mut() {
-        if player.chr_ins.field_ins_handle == handle {
-            return apply_chr_fp_delta(&mut player.chr_ins, delta);
+    if let Some(player) = world_chr_man.player.as_mut()
+        && player.actor.handle == handle {
+            return apply_chr_fp_delta(&mut player.actor, delta);
         }
-    }
-    world_chr_man
-        .chr_ins_by_handle_mut(&handle)
-        .map(|chr| apply_chr_fp_delta(chr, delta))
+    hud_actor_by_handle(world_chr_man, &handle)
+        .map(|mut chr| apply_chr_fp_delta(&mut chr, delta))
         .or_else(|| {
             revenant_buddy_chr_by_handle_mut(world_chr_man, handle)
-                .map(|chr| apply_chr_fp_delta(chr, delta))
+                .map(|chr| apply_chr_fp_delta_address(chr.address, delta))
         })
         .unwrap_or(0)
 }
 
-fn apply_chr_fp_delta(chr: &mut ChrIns, delta: i32) -> i32 {
-    let data = chr.modules.as_mut().data.as_mut();
-    let old_fp = data.fp;
-    let max_fp = data.max_fp.max(1);
-    let new_fp = old_fp.saturating_add(delta).clamp(0, max_fp);
-    data.fp = new_fp;
-    new_fp - old_fp
+fn apply_chr_fp_delta(chr: &mut HudActor, delta: i32) -> i32 {
+    apply_chr_fp_delta_address(chr.identity.address, delta)
+}
+
+fn apply_chr_fp_delta_address(address: u64, delta: i32) -> i32 {
+    // SAFETY: This existing callback requires stable exclusive native character/vital storage.
+    let result = unsafe {
+        native_vitals::change(
+            address,
+            shikifsrs_elden_ring::character_vitals::CharacterVital::Mp,
+            native_vitals::VitalChange::Delta(delta),
+        )
+    };
+    match result {
+        Ok(applied) => applied,
+        Err(error) => {
+            append_damage_log(&format!(
+                "FP change rejected or uncertain; receipt retained: {error}"
+            ));
+            0
+        }
+    }
 }
 
 fn recluse_blood_attacker_is_friendly(
-    world_chr_man: &WorldChrMan,
-    attacker: FieldInsHandle,
-    player_handle: FieldInsHandle,
+    world_chr_man: &HudWorld,
+    attacker: HudHandle,
+    player_handle: HudHandle,
     player_team_type: u8,
 ) -> bool {
     if attacker.is_empty() {
@@ -4658,24 +5126,30 @@ fn recluse_blood_attacker_is_friendly(
     if attacker == player_handle {
         return true;
     }
-    if let Some(chr) = world_chr_man.chr_ins_by_handle(&attacker) {
-        return recluse_blood_chr_is_friendly(chr, player_team_type);
+    if let Some(chr) = hud_actor_by_handle(world_chr_man, &attacker) {
+        return recluse_blood_chr_is_friendly(&chr, player_team_type);
     }
     revenant_buddy_chr_by_handle(world_chr_man, attacker)
-        .is_some_and(|chr| recluse_blood_chr_is_friendly(chr, player_team_type))
+        .is_some_and(|target| recluse_blood_identity_is_friendly(target, player_team_type))
 }
 
-fn recluse_blood_chr_is_friendly(chr: &ChrIns, player_team_type: u8) -> bool {
-    if player_team_type != 0 && chr.team_type == player_team_type {
-        return true;
+fn recluse_blood_identity_is_friendly(
+    target: shikifsrs_elden_ring::character_sets::CharacterIdentity,
+    player_team_type: u8,
+) -> bool {
+    native_character::friendly_to_team(target, player_team_type, REVENANT_CONVERTED_SOUL_TEAM_TYPE)
+        .map_err(|error| eprintln!("ShikiFSRS HUD friendship observation rejected: {error}"))
+        .unwrap_or(false)
+}
+
+fn recluse_blood_chr_is_friendly(chr: &HudActor, player_team_type: u8) -> bool {
+    match native_vitals::identity(chr.identity.address) {
+        Ok(target) => recluse_blood_identity_is_friendly(target, player_team_type),
+        Err(error) => {
+            eprintln!("ShikiFSRS HUD friendship identity rejected: {error}");
+            false
+        }
     }
-    if chr.team_type == REVENANT_CONVERTED_SOUL_TEAM_TYPE {
-        return true;
-    }
-    matches!(
-        chr.chr_type,
-        ChrType::Local | ChrType::WhitePhantom | ChrType::WhiteSummonNpc | ChrType::BluePhantom
-    )
 }
 
 fn advance_layered_charge(layers: &mut [f32; 2], max_layers: usize, mut charge: f32) {
@@ -4706,13 +5180,12 @@ fn spend_skill_charge(layers: &mut [f32; 2], max_layers: usize) {
     }
 }
 
-fn consume_effect(
-    player: &mut eldenring::cs::PlayerIns,
-    active_effects: &[i32],
-    sp_effect: i32,
-) -> bool {
+fn consume_effect(player: &mut HudPlayer, active_effects: &[i32], sp_effect: i32) -> bool {
     if active_effects.contains(&sp_effect) {
-        player.chr_ins.remove_speffect(sp_effect);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, sp_effect) },
+        );
         true
     } else {
         false
@@ -4720,7 +5193,7 @@ fn consume_effect(
 }
 
 fn consume_event_effect(
-    player: &mut eldenring::cs::PlayerIns,
+    player: &mut HudPlayer,
     active_effects: &[i32],
     config: &RoleConfig,
     offset: i32,
@@ -4736,35 +5209,46 @@ fn legacy_event_effect_id(config: &RoleConfig, offset: i32) -> Option<i32> {
     let legacy = config.effect(offset);
     // Undertaker's former ultimate aliases now belong to its buff and dodge outputs.
     let reserved = config.role == Role::Undertaker
-        && matches!(offset, SP_ULTIMATE_CHARGED_USED | SP_ULTIMATE_UNCHARGED_USED);
+        && matches!(
+            offset,
+            SP_ULTIMATE_CHARGED_USED | SP_ULTIMATE_UNCHARGED_USED
+        );
     (legacy != shared_effect(offset) && !reserved).then_some(legacy)
 }
 
-fn set_effect(player: &mut eldenring::cs::PlayerIns, sp_effect: i32, active: bool) {
+fn set_effect(player: &mut HudPlayer, sp_effect: i32, active: bool) {
     if active {
-        player.apply_speffect(sp_effect, true);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::apply_effect(player.actor.identity.address, sp_effect, true)
+            },
+        );
     } else {
-        player.chr_ins.remove_speffect(sp_effect);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, sp_effect) },
+        );
     }
 }
 
-fn remove_revenant_summon_death_effects(world_chr_man: &mut WorldChrMan) {
-    if let Some(player) = world_chr_man.main_player.as_mut() {
+fn remove_revenant_summon_death_effects(world_chr_man: &mut HudWorld) {
+    if let Some(player) = world_chr_man.player.as_mut() {
         remove_revenant_summon_death_effects_from_player(player);
     }
 }
 
-fn remove_revenant_summon_death_effects_from_player(player: &mut eldenring::cs::PlayerIns) {
+fn remove_revenant_summon_death_effects_from_player(player: &mut HudPlayer) {
     for effect in REVENANT_SUMMON_DEATH_EFFECTS {
-        player.chr_ins.remove_speffect(effect);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, effect) },
+        );
     }
 }
 
-fn sync_revenant_summon_active_effects(
-    world_chr_man: &mut WorldChrMan,
-    active_index: Option<usize>,
-) {
-    let Some(player) = world_chr_man.main_player.as_mut() else {
+fn sync_revenant_summon_active_effects(world_chr_man: &mut HudWorld, active_index: Option<usize>) {
+    let Some(player) = world_chr_man.player.as_mut() else {
         return;
     };
     for (index, effect) in REVENANT_SUMMON_ACTIVE_EFFECTS.into_iter().enumerate() {
@@ -4772,30 +5256,41 @@ fn sync_revenant_summon_active_effects(
     }
 }
 
-fn remove_revenant_summon_active_effects(world_chr_man: &mut WorldChrMan) {
-    if let Some(player) = world_chr_man.main_player.as_mut() {
+fn remove_revenant_summon_active_effects(world_chr_man: &mut HudWorld) {
+    if let Some(player) = world_chr_man.player.as_mut() {
         remove_revenant_summon_active_effects_from_player(player);
     }
 }
 
-fn remove_revenant_summon_active_effects_from_player(player: &mut eldenring::cs::PlayerIns) {
+fn remove_revenant_summon_active_effects_from_player(player: &mut HudPlayer) {
     for effect in REVENANT_SUMMON_ACTIVE_EFFECTS {
-        player.chr_ins.remove_speffect(effect);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, effect) },
+        );
     }
 }
 
-fn clear_undertaker_skill_effects(player: &mut PlayerIns) {
+fn clear_undertaker_skill_effects(player: &mut HudPlayer) {
     set_undertaker_auto_dodge_armed(false);
-    clear_undertaker_dodge_effects(player);
+    match native_vitals::identity(player.actor.identity.address) {
+        Ok(target) => {
+            native_character::report_effect_result(clear_undertaker_dodge_effects(target))
+        }
+        Err(error) => eprintln!("ShikiFSRS HUD dodge cleanup identity rejected: {error}"),
+    }
     for effect in [
         SP_UNDERTAKER_NORMAL_SKILL_BUFF,
         SP_UNDERTAKER_ENHANCED_SKILL_BUFF,
     ] {
-        player.chr_ins.remove_speffect(effect);
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe { native_character::remove_effect(player.actor.identity.address, effect) },
+        );
     }
 }
 
-fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
+fn remove_role_outputs(player: &mut HudPlayer, config: &RoleConfig) {
     for offset in [
         SP_SKILL_READY_1,
         SP_SKILL_READY_2,
@@ -4803,8 +5298,24 @@ fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfi
         SP_ULTIMATE_READY_LEGACY_100,
         SP_ULTIMATE_READY,
     ] {
-        player.chr_ins.remove_speffect(config.effect(offset));
-        player.chr_ins.remove_speffect(shared_effect(offset));
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    config.effect(offset),
+                )
+            },
+        );
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    shared_effect(offset),
+                )
+            },
+        );
     }
     if config.role == Role::Recluse {
         clear_recluse_outputs(player, config);
@@ -4818,15 +5329,21 @@ fn remove_role_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfi
     }
 }
 
-fn clear_recluse_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
-    player
-        .chr_ins
-        .remove_speffect(config.effect(SP_RECLUSE_RELEASED));
+fn clear_recluse_outputs(player: &mut HudPlayer, config: &RoleConfig) {
+    native_character::report_effect_result(
+        // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+        unsafe {
+            native_character::remove_effect(
+                player.actor.identity.address,
+                config.effect(SP_RECLUSE_RELEASED),
+            )
+        },
+    );
     clear_recluse_absorb_outputs(player, config);
     clear_recluse_magic_outputs(player, config);
 }
 
-fn clear_recluse_absorb_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
+fn clear_recluse_absorb_outputs(player: &mut HudPlayer, config: &RoleConfig) {
     for offset in [
         SP_RECLUSE_RESTORE_FP,
         SP_RECLUSE_ABSORB_MAGIC,
@@ -4834,33 +5351,61 @@ fn clear_recluse_absorb_outputs(player: &mut eldenring::cs::PlayerIns, config: &
         SP_RECLUSE_ABSORB_LIGHTNING,
         SP_RECLUSE_ABSORB_HOLY,
     ] {
-        player.chr_ins.remove_speffect(config.effect(offset));
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    config.effect(offset),
+                )
+            },
+        );
     }
 }
 
-fn clear_recluse_magic_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
+fn clear_recluse_magic_outputs(player: &mut HudPlayer, config: &RoleConfig) {
     for index in 0..14 {
-        player
-            .chr_ins
-            .remove_speffect(config.effect(SP_RECLUSE_MIXED_MAGIC_BASE + index));
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    config.effect(SP_RECLUSE_MIXED_MAGIC_BASE + index),
+                )
+            },
+        );
     }
 }
 
-fn clear_scholar_self_outputs(player: &mut eldenring::cs::PlayerIns, config: &RoleConfig) {
+fn clear_scholar_self_outputs(player: &mut HudPlayer, config: &RoleConfig) {
     for index in 0..3 {
-        player
-            .chr_ins
-            .remove_speffect(config.effect(SP_SCHOLAR_SELF_STAGE_BASE + index));
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    player.actor.identity.address,
+                    config.effect(SP_SCHOLAR_SELF_STAGE_BASE + index),
+                )
+            },
+        );
     }
 }
 
-fn clear_scholar_enemy_outputs(enemy: &mut eldenring::cs::ChrIns, config: &RoleConfig) {
+fn clear_scholar_enemy_outputs(enemy: &mut HudActor, config: &RoleConfig) {
     for index in 0..3 {
-        enemy.remove_speffect(config.effect(SP_SCHOLAR_ENEMY_STAGE_BASE + index));
+        native_character::report_effect_result(
+            // SAFETY: The owning native callback retains the complete effect/unlink/PARAM graph.
+            unsafe {
+                native_character::remove_effect(
+                    enemy.identity.address,
+                    config.effect(SP_SCHOLAR_ENEMY_STAGE_BASE + index),
+                )
+            },
+        );
     }
 }
 
-fn remove_all_role_outputs(player: &mut eldenring::cs::PlayerIns) {
+fn remove_all_role_outputs(player: &mut HudPlayer) {
     for config in ROLE_CONFIGS.iter() {
         remove_role_outputs(player, config);
     }
@@ -4873,10 +5418,22 @@ mod undertaker_skill_buff_tests {
     #[test]
     fn buff_and_dodge_outputs_are_not_consumed_as_ultimate_aliases() {
         let config = role_config(Role::Undertaker);
-        assert_eq!(config.effect(SP_ULTIMATE_CHARGED_USED), SP_UNDERTAKER_ENHANCED_SKILL_BUFF);
-        assert_eq!(config.effect(SP_ULTIMATE_UNCHARGED_USED), SP_UNDERTAKER_AUTO_DODGE_TRIGGER);
-        assert_eq!(legacy_event_effect_id(config, SP_ULTIMATE_CHARGED_USED), None);
-        assert_eq!(legacy_event_effect_id(config, SP_ULTIMATE_UNCHARGED_USED), None);
+        assert_eq!(
+            config.effect(SP_ULTIMATE_CHARGED_USED),
+            SP_UNDERTAKER_ENHANCED_SKILL_BUFF
+        );
+        assert_eq!(
+            config.effect(SP_ULTIMATE_UNCHARGED_USED),
+            SP_UNDERTAKER_AUTO_DODGE_TRIGGER
+        );
+        assert_eq!(
+            legacy_event_effect_id(config, SP_ULTIMATE_CHARGED_USED),
+            None
+        );
+        assert_eq!(
+            legacy_event_effect_id(config, SP_ULTIMATE_UNCHARGED_USED),
+            None
+        );
         assert_eq!(shared_effect(SP_ULTIMATE_CHARGED_USED), 880021);
         assert_eq!(shared_effect(SP_ULTIMATE_UNCHARGED_USED), 880022);
         assert_eq!(legacy_event_effect_id(config, SP_SKILL_USED), Some(880911));
@@ -4884,7 +5441,10 @@ mod undertaker_skill_buff_tests {
 
     #[test]
     fn other_roles_retain_their_existing_ultimate_aliases() {
-        for config in ROLE_CONFIGS.iter().filter(|config| config.role != Role::Undertaker) {
+        for config in ROLE_CONFIGS
+            .iter()
+            .filter(|config| config.role != Role::Undertaker)
+        {
             for offset in [SP_ULTIMATE_CHARGED_USED, SP_ULTIMATE_UNCHARGED_USED] {
                 let legacy = config.effect(offset);
                 let expected = (legacy != shared_effect(offset)).then_some(legacy);
@@ -4904,7 +5464,10 @@ mod undertaker_skill_buff_tests {
             state.reset_for_role(Some(Role::Undertaker));
             assert_eq!(state.begin_undertaker_skill(enhanced, now), effect);
             assert_eq!(state.undertaker_buff_duration, seconds);
-            assert_eq!(state.undertaker_buff_end, Some(now + Duration::from_secs_f32(seconds)));
+            assert_eq!(
+                state.undertaker_buff_end,
+                Some(now + Duration::from_secs_f32(seconds))
+            );
             assert_eq!(state.skill_ready_count(role_config(Role::Undertaker)), 0);
         }
     }
@@ -4945,14 +5508,14 @@ mod undertaker_skill_buff_tests {
 
 #[cfg(test)]
 mod revenant_active_effect_tests {
+    use crate::HudHandle;
     use super::{
         ChargeState, REVENANT_SUMMON_COUNT, WylderHookshotNativeResolver,
         WylderHookshotNativeResult, normalized_super_armor,
-        resurrection_accumulation_teammate_is_friendly, revenant_active_effect_index,
-        resurrection_accumulation_teammate_should_display, revenant_creator_request_consumed,
-        revenant_debug_spawn_submission_ready,
+        resurrection_accumulation_teammate_is_friendly,
+        resurrection_accumulation_teammate_should_display, revenant_active_effect_index,
+        revenant_creator_request_consumed, revenant_debug_spawn_submission_ready,
     };
-    use eldenring::cs::{ChrType, FieldInsHandle};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -4964,22 +5527,13 @@ mod revenant_active_effect_tests {
             false, false, now, ready_at,
         ));
         assert!(!revenant_debug_spawn_submission_ready(
-            true,
-            false,
-            ready_at,
-            ready_at,
+            true, false, ready_at, ready_at,
         ));
         assert!(!revenant_debug_spawn_submission_ready(
-            false,
-            true,
-            ready_at,
-            ready_at,
+            false, true, ready_at, ready_at,
         ));
         assert!(revenant_debug_spawn_submission_ready(
-            false,
-            false,
-            ready_at,
-            ready_at,
+            false, false, ready_at, ready_at,
         ));
     }
 
@@ -4992,14 +5546,26 @@ mod revenant_active_effect_tests {
 
     #[test]
     fn bound_living_family_selects_its_output() {
-        assert_eq!(revenant_active_effect_index(Some(0), None, Some(1.0)), Some(0));
-        assert_eq!(revenant_active_effect_index(Some(1), None, Some(0.5)), Some(1));
-        assert_eq!(revenant_active_effect_index(Some(2), None, Some(0.01)), Some(2));
+        assert_eq!(
+            revenant_active_effect_index(Some(0), None, Some(1.0)),
+            Some(0)
+        );
+        assert_eq!(
+            revenant_active_effect_index(Some(1), None, Some(0.5)),
+            Some(1)
+        );
+        assert_eq!(
+            revenant_active_effect_index(Some(2), None, Some(0.01)),
+            Some(2)
+        );
     }
 
     #[test]
     fn pending_missing_dead_or_invalid_family_has_no_output() {
-        assert_eq!(revenant_active_effect_index(Some(0), Some(0), Some(1.0)), None);
+        assert_eq!(
+            revenant_active_effect_index(Some(0), Some(0), Some(1.0)),
+            None
+        );
         assert_eq!(revenant_active_effect_index(Some(0), None, None), None);
         assert_eq!(revenant_active_effect_index(Some(0), None, Some(0.0)), None);
         assert_eq!(revenant_active_effect_index(None, None, Some(1.0)), None);
@@ -5012,13 +5578,13 @@ mod revenant_active_effect_tests {
         state.revenant_active_summon = Some(1);
         state.revenant_effect_mask = 0b010;
         state.revenant_summon_hp = [0.25, 0.5, 0.75];
-        state.revenant_summon_handles = [Some(FieldInsHandle::none()); REVENANT_SUMMON_COUNT];
+        state.revenant_summon_handles = [Some(HudHandle::none()); REVENANT_SUMMON_COUNT];
         state.revenant_summon_effect_seen = [false; REVENANT_SUMMON_COUNT];
         state.revenant_summon_death_locked = [true, false, true];
         state.revenant_summon_restore_timer = [1.0, 2.0, 3.0];
         state.revenant_buddy_count = 1;
-        state.revenant_known_buddy_handles = vec![FieldInsHandle::none()];
-        state.revenant_bind_baseline = vec![FieldInsHandle::none()];
+        state.revenant_known_buddy_handles = vec![HudHandle::none()];
+        state.revenant_bind_baseline = vec![HudHandle::none()];
         state.revenant_pending_summon_bind = Some(1);
 
         state.reset_revenant_presence_for_map_refresh();
@@ -5026,8 +5592,14 @@ mod revenant_active_effect_tests {
         assert_eq!(state.revenant_active_summon, None);
         assert_eq!(state.revenant_effect_mask, 0);
         assert_eq!(state.revenant_summon_handles, [None; REVENANT_SUMMON_COUNT]);
-        assert_eq!(state.revenant_summon_effect_seen, [true; REVENANT_SUMMON_COUNT]);
-        assert_eq!(state.revenant_summon_restore_timer, [0.0; REVENANT_SUMMON_COUNT]);
+        assert_eq!(
+            state.revenant_summon_effect_seen,
+            [true; REVENANT_SUMMON_COUNT]
+        );
+        assert_eq!(
+            state.revenant_summon_restore_timer,
+            [0.0; REVENANT_SUMMON_COUNT]
+        );
         assert_eq!(state.revenant_buddy_count, 0);
         assert!(state.revenant_known_buddy_handles.is_empty());
         assert!(state.revenant_bind_baseline.is_empty());
@@ -5050,17 +5622,13 @@ mod revenant_active_effect_tests {
 
     #[test]
     fn resurrection_teammates_accept_coop_player_types_and_explicit_same_team() {
-        for chr_type in [
-            ChrType::Local,
-            ChrType::WhitePhantom,
-            ChrType::BluePhantom,
-        ] {
+        for chr_type in [0, 1, 17] {
             assert!(resurrection_accumulation_teammate_is_friendly(
                 chr_type, 0, 0
             ));
         }
         assert!(resurrection_accumulation_teammate_is_friendly(
-            ChrType::Arena,
+            13,
             47,
             47
         ));
@@ -5068,21 +5636,15 @@ mod revenant_active_effect_tests {
 
     #[test]
     fn resurrection_teammates_reject_hostile_and_npc_player_types() {
-        for chr_type in [
-            ChrType::Duelist,
-            ChrType::BloodyFinger,
-            ChrType::Recusant,
-            ChrType::FesteringBloodyFinger,
-            ChrType::Npc,
-            ChrType::WhiteSummonNpc,
-            ChrType::Ghost,
-        ] {
+        // Native table range is 0..23; NPC/cooperative NPC, hostile, ghosts,
+        // unnamed kinds and signed out-of-range values must not pass by team alone.
+        for chr_type in [i32::MIN, -1, 2, 3, 4, 5, 6, 7, 9, 14, 15, 16, 18, 19, 20, 21, 22, 23, i32::MAX] {
             assert!(!resurrection_accumulation_teammate_is_friendly(
                 chr_type, 0, 0
             ));
         }
         assert!(!resurrection_accumulation_teammate_is_friendly(
-            ChrType::BloodyFinger,
+            2,
             47,
             47
         ));
@@ -5141,8 +5703,9 @@ mod revenant_active_effect_tests {
 
 #[cfg(test)]
 mod wylder_hookshot_movement_stop_tests {
+    use crate::HudHandle;
     use super::{
-        HavokPosition, WylderHookshotCapsule, WylderHookshotMovementDestination,
+        HudPosition, WylderHookshotCapsule, WylderHookshotMovementDestination,
         WylderHookshotMovementStopDetector, wylder_hookshot_capsule_from_values,
         wylder_hookshot_capsules_touch,
     };
@@ -5151,23 +5714,23 @@ mod wylder_hookshot_movement_stop_tests {
     #[test]
     fn close_destination_waits_for_the_startup_grace_period() {
         let now = Instant::now();
-        let target = HavokPosition::from_xyz(10.0, 0.0, 0.0);
+        let target = HudPosition::from_xyz(10.0, 0.0, 0.0);
         let mut detector = WylderHookshotMovementStopDetector::default();
         detector.begin(
             Some(WylderHookshotMovementDestination::Point(target)),
-            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            HudPosition::from_xyz(0.0, 0.0, 0.0),
             now,
         );
 
         assert!(!detector.sample(
-            HavokPosition::from_xyz(9.2, 0.0, 0.0),
+            HudPosition::from_xyz(9.2, 0.0, 0.0),
             Some(target),
             None,
             None,
             now + Duration::from_millis(40),
         ));
         assert!(detector.sample(
-            HavokPosition::from_xyz(9.2, 0.0, 0.0),
+            HudPosition::from_xyz(9.2, 0.0, 0.0),
             Some(target),
             None,
             None,
@@ -5178,30 +5741,30 @@ mod wylder_hookshot_movement_stop_tests {
     #[test]
     fn crossing_the_target_plane_stops_even_after_a_large_frame_step() {
         let now = Instant::now();
-        let target = HavokPosition::from_xyz(10.0, 0.0, 0.0);
+        let target = HudPosition::from_xyz(10.0, 0.0, 0.0);
         let mut detector = WylderHookshotMovementStopDetector::default();
         detector.begin(
             Some(WylderHookshotMovementDestination::Point(target)),
-            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            HudPosition::from_xyz(0.0, 0.0, 0.0),
             now,
         );
 
         assert!(!detector.sample(
-            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            HudPosition::from_xyz(0.0, 0.0, 0.0),
             Some(target),
             None,
             None,
             now,
         ));
         assert!(!detector.sample(
-            HavokPosition::from_xyz(8.0, 0.0, 0.0),
+            HudPosition::from_xyz(8.0, 0.0, 0.0),
             Some(target),
             None,
             None,
             now + Duration::from_millis(100),
         ));
         assert!(detector.sample(
-            HavokPosition::from_xyz(11.5, 0.0, 0.0),
+            HudPosition::from_xyz(11.5, 0.0, 0.0),
             Some(target),
             None,
             None,
@@ -5212,30 +5775,30 @@ mod wylder_hookshot_movement_stop_tests {
     #[test]
     fn moving_away_after_the_closest_point_stops_the_pull() {
         let now = Instant::now();
-        let target = HavokPosition::from_xyz(10.0, 0.0, 0.0);
+        let target = HudPosition::from_xyz(10.0, 0.0, 0.0);
         let mut detector = WylderHookshotMovementStopDetector::default();
         detector.begin(
             Some(WylderHookshotMovementDestination::Point(target)),
-            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            HudPosition::from_xyz(0.0, 0.0, 0.0),
             now,
         );
 
         assert!(!detector.sample(
-            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            HudPosition::from_xyz(0.0, 0.0, 0.0),
             Some(target),
             None,
             None,
             now,
         ));
         assert!(!detector.sample(
-            HavokPosition::from_xyz(8.0, 0.0, 0.0),
+            HudPosition::from_xyz(8.0, 0.0, 0.0),
             Some(target),
             None,
             None,
             now + Duration::from_millis(100),
         ));
         assert!(detector.sample(
-            HavokPosition::from_xyz(7.7, 0.0, 0.0),
+            HudPosition::from_xyz(7.7, 0.0, 0.0),
             Some(target),
             None,
             None,
@@ -5246,25 +5809,23 @@ mod wylder_hookshot_movement_stop_tests {
     #[test]
     fn stop_request_is_emitted_only_once_per_activation() {
         let now = Instant::now();
-        let target = HavokPosition::from_xyz(2.0, 0.0, 0.0);
+        let target = HudPosition::from_xyz(2.0, 0.0, 0.0);
         let mut detector = WylderHookshotMovementStopDetector::default();
         detector.begin(
-            Some(WylderHookshotMovementDestination::Enemy(
-                eldenring::cs::FieldInsHandle::none(),
-            )),
-            HavokPosition::from_xyz(0.0, 0.0, 0.0),
+            Some(WylderHookshotMovementDestination::Enemy(HudHandle::none())),
+            HudPosition::from_xyz(0.0, 0.0, 0.0),
             now,
         );
 
         assert!(detector.sample(
-            HavokPosition::from_xyz(0.6, 0.0, 0.0),
+            HudPosition::from_xyz(0.6, 0.0, 0.0),
             Some(target),
             None,
             None,
             now + Duration::from_millis(100),
         ));
         assert!(!detector.sample(
-            HavokPosition::from_xyz(0.8, 0.0, 0.0),
+            HudPosition::from_xyz(0.8, 0.0, 0.0),
             Some(target),
             None,
             None,
@@ -5308,32 +5869,31 @@ mod wylder_hookshot_movement_stop_tests {
             height: 5.0,
             radius: 2.5,
         };
-        let origin = HavokPosition::from_xyz(0.0, 0.0, 0.0);
+        let origin = HudPosition::from_xyz(0.0, 0.0, 0.0);
 
         assert!(wylder_hookshot_capsules_touch(
             origin,
             player,
-            HavokPosition::from_xyz(0.99, 0.0, 0.0),
+            HudPosition::from_xyz(0.99, 0.0, 0.0),
             small_enemy,
         ));
         assert!(!wylder_hookshot_capsules_touch(
             origin,
             player,
-            HavokPosition::from_xyz(1.05, 0.0, 0.0),
+            HudPosition::from_xyz(1.05, 0.0, 0.0),
             small_enemy,
         ));
         assert!(wylder_hookshot_capsules_touch(
             origin,
             player,
-            HavokPosition::from_xyz(3.0, 0.0, 0.0),
+            HudPosition::from_xyz(3.0, 0.0, 0.0),
             large_enemy,
         ));
         assert!(!wylder_hookshot_capsules_touch(
             origin,
             player,
-            HavokPosition::from_xyz(0.5, 2.2, 0.0),
+            HudPosition::from_xyz(0.5, 2.2, 0.0),
             small_enemy,
         ));
     }
 }
-

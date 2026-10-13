@@ -9,28 +9,43 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use eldenring::{
-    cs::{
-        AtkParam_Npc, AtkParam_Pc, BuddyParam, BuddyStoneParam, BulletSpawnData, CSBulletManager,
-        CSCamExt, CSCamera, CSFeManHudState, CSFeManImp, CSHavokMan, CSNowLoadingHelper,
-        CSTaskGroupIndex, CSTaskImp, CSWindowImp, ChrDebugSpawnRequest, ChrIns, ChrInsExt, ChrType,
-        EnemyIns, FieldInsHandle, FieldInsType, GameDataMan, GameMan, LockCamParam, NpcParam,
-        NpcThinkParam, PlayerIns, SoloParamRepository, SpEffectParam, WorldChrMan,
-        bullet_spawn_rva,
-    },
-    fd4::FD4TaskData,
-    position::{DirectionalVector, HavokPosition, PositionDelta},
-    util::system::wait_for_system_init,
-};
-use fromsoftware_shared::{FromStatic, SharedTaskImpExt, Superclass, program::Program};
+mod actors;
+use actors::{HudActor, HudDelta, HudPlayer, HudPosition, HudWorld, hud_actor_by_handle};
 use hudhook::windows::Win32::Foundation::HINSTANCE;
 use hudhook::{
     ImguiRenderLoop, RenderContext,
-    hooks::dx12::ImguiDx12Hooks,
     imgui::{Context, ImColor32, TextureId, Ui, sys},
 };
 use image::io::Reader as ImageReader;
-use pelite::pe64::{Pe, PeObject};
+#[path = "../../../character_runtime.rs"]
+#[allow(
+    dead_code,
+    reason = "Shared adapter APIs are exercised by the attack-summon workspace member"
+)]
+mod character_runtime;
+#[path = "../../nightreign-attack-summon/src/creation.rs"]
+#[allow(
+    dead_code,
+    reason = "Shared adapter APIs are exercised by the attack-summon workspace member"
+)]
+mod hud_creation_queue;
+mod native_buddy;
+mod native_bullets;
+mod native_camera;
+mod native_character;
+mod native_creation;
+mod native_handles;
+mod native_hooks;
+mod native_hud;
+mod native_tasks;
+mod native_vitals;
+mod native_world;
+use native_handles::HudHandle;
+mod native_parameters;
+#[path = "../../../sdk_host.rs"]
+mod sdk_host;
+#[path = "../../../precision_runtime.rs"]
+mod sdk_precision;
 
 include!("runtime_layout.rs");
 include!("damage.rs");

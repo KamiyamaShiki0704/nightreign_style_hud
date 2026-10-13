@@ -1,15 +1,14 @@
 #[unsafe(no_mangle)]
 /// # Safety
-pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
-    debug::initialize::<ImguiDx12Hooks>(
-        hmodule,
-        reason,
-        || {
-            wait_for_system_init(&Program::current(), Duration::MAX)
-                .expect("Timeout waiting for system init");
-        },
-        NightreignStyleHud::new(),
-    )
+pub unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
+    if reason == 1 {
+        std::thread::spawn(|| {
+            if let Err(error) = sdk_host::start_overlay(|| Box::new(NightreignStyleHud::new())) {
+                eprintln!("Shiki HUD initialization: {error}");
+            }
+        });
+    }
+    1
 }
 
 #[derive(Clone, Copy)]
@@ -78,11 +77,21 @@ impl ImguiRenderLoop for NightreignStyleHud {
     fn initialize(&mut self, ctx: &mut Context, render_context: &mut dyn RenderContext) {
         ctx.io_mut().config_flags |= hudhook::imgui::ConfigFlags::NO_MOUSE_CURSOR_CHANGE;
         self.icons.load(render_context);
+        // SAFETY: Current renderer initialization supplies the experimental exclusive install phase.
+        if let Err(error) = unsafe { native_hooks::prepare() } {
+            append_damage_log(&format!("[init] Shiki hook preparation failed: {error}"));
+            return;
+        }
         install_damage_hook_once();
         install_undertaker_auto_dodge_hook_once();
         install_revenant_summon_range_hook_once();
         install_camera_directed_position_hook_once();
         install_multi_lock_bullet_hook_once();
+        // SAFETY: Retained batch has completed all five actual attempts; no callback was admitted yet.
+        if let Err(error) = unsafe { native_hooks::publish() } {
+            append_damage_log(&format!("[init] Shiki hook publication failed: {error}"));
+            return;
+        }
         install_ironeye_runtime_tasks_once();
     }
 
@@ -104,8 +113,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
         draw_resurrection_accumulation_ui(
             ui,
             self.charges.resurrection_accumulation_snapshot(),
-            self.charges
-                .teammate_resurrection_accumulation_snapshots(),
+            self.charges.teammate_resurrection_accumulation_snapshots(),
             self.icons.resurrection_accumulation,
             self.scale,
         );
@@ -201,12 +209,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
                 self.scale,
             );
         } else if role == Role::Wylder {
-            draw_wylder_skill_lock_ui(
-                ui,
-                &snapshot,
-                self.icons.wylder_skill_lock,
-                self.scale,
-            );
+            draw_wylder_skill_lock_ui(ui, &snapshot, self.icons.wylder_skill_lock, self.scale);
         } else if role == Role::Revenant && !snapshot.revenant_skill_move_hud {
             draw_revenant_static_summon_ui(
                 ui,
@@ -357,20 +360,20 @@ const HUD_LOADING_HIDE_GRACE_SECONDS: f32 = 1.5;
 fn hud_game_state(now: Instant) -> HudGameState {
     let mut state = HudGameState::default();
 
-    if let Ok(loading) = unsafe { CSNowLoadingHelper::instance() } {
-        if let Ok(mut gate) = LOADING_HUD_GATE.lock() {
+    if let Ok(Some(loading)) =
+        sdk_host::with_objects(|objects, epoch| objects.loading_sequence(epoch))
+        && let Ok(mut gate) = LOADING_HUD_GATE.lock() {
             state.loading_cycle_changed =
-                gate.observe_menu_load_counter(loading.menu_load_counter, now);
+                gate.observe_menu_load_counter(loading.native_sequence, now);
             state.hidden = now < gate.hide_until;
         }
-    }
-
-    if unsafe { CSFeManImp::instance() }
-        .map(|fe_man| fe_man.hud_state != CSFeManHudState::Default)
-        .unwrap_or(false)
-    {
-        state.hidden = true;
-    }
+    // Independent observations preserve the owned visibility policy even when one source fails.
+    // A cyclic loading choice is not an epoch notification or a scene classification.
+    if let Ok(Some(frontend)) =
+        sdk_host::with_objects(|objects, epoch| objects.frontend_state(epoch))
+        && frontend.native_state != 0 {
+            state.hidden = true;
+        }
 
     state
 }
@@ -404,4 +407,3 @@ mod loading_hud_gate_tests {
         assert!(!gate.observe_menu_load_counter(11, now));
     }
 }
-

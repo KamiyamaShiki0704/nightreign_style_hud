@@ -153,7 +153,7 @@ struct ScholarTargetState {
     progress: f32,
     pos: [f32; 2],
     visible: bool,
-    handle: Option<FieldInsHandle>,
+    handle: Option<HudHandle>,
 }
 
 impl ScholarTargetState {
@@ -171,10 +171,10 @@ enum ScholarLinkKind {
 
 #[derive(Clone, Copy)]
 struct ScholarLink {
-    handle: FieldInsHandle,
+    handle: HudHandle,
     kind: ScholarLinkKind,
     hp: i32,
-    last_hit_by: Option<FieldInsHandle>,
+    last_hit_by: Option<HudHandle>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -187,93 +187,6 @@ struct ScholarScanDebug {
     range_skip: usize,
     los_skip: usize,
     accepted: usize,
-    candidate: ScholarCandidateDebug,
-}
-
-#[derive(Clone, Copy, Default)]
-#[allow(dead_code)]
-struct ScholarCandidateDebug {
-    active: bool,
-    selector_index: u32,
-    selector_container: u32,
-    block_area: u8,
-    block_block: u8,
-    block_region: u8,
-    block_index: u8,
-    npc_id: i32,
-    chr_type: i32,
-    hp: i32,
-    max_hp: i32,
-    distance: f32,
-    load_status: u8,
-    chr_update_type: u8,
-    draw_group: bool,
-    backread_disabled: bool,
-    host_inactive: bool,
-    extinction_death: bool,
-    near_pc: bool,
-    render_group: bool,
-    onscreen_flag: bool,
-    enable_render: bool,
-    death_flag: bool,
-    is_active: bool,
-    update_tasks_registered: bool,
-    force_unloaded: bool,
-    character_disabled: bool,
-    tint_alpha: f32,
-    tint_alpha_modifier: f32,
-    base_transparency: f32,
-    base_transparency_modifier: f32,
-    event_entity_id: u32,
-    chr_set_entry_flags: u8,
-    activation_enabled: bool,
-    activate_threshold_exceeded: bool,
-    sounds_active: bool,
-    opacity_keyframes: f32,
-    opacity_keyframes_previous: f32,
-    camouflage_transparency: f32,
-    distance_to_player_sqr: f32,
-    horizontal_distance_to_player_sqr: f32,
-    max_render_range: f32,
-    chr_activate_threshold: f32,
-    current_anim_id: i32,
-    request_anim_id: i32,
-    idle_anim_id: i32,
-    current_tae_id: i32,
-    chr_collision: usize,
-    ctrl_disable_move: bool,
-    ctrl_disable_player_collision: bool,
-    ctrl_disable_hit: bool,
-    ctrl_disable_map_collision: bool,
-    ctrl_disable_capsule_collision: bool,
-    ctrl_disable_object_collision: bool,
-    ctrl_proxy_pos_sync: bool,
-    ctrl_proxy_rot_sync: bool,
-    physics_chr_proxy: usize,
-    physics_chr_proxy2: usize,
-    physics_collision_shape: usize,
-    physics_pos_update_requested: bool,
-    physics_standing_on_ground: bool,
-    physics_touching_ground: bool,
-    physics_slide_enabled: bool,
-    physics_gravity_disabled: bool,
-    chr_ptr: usize,
-    data_ptr: usize,
-    chr_set_entry_ptr: usize,
-    msb_draw_flags: u32,
-    msb_part_ptr: usize,
-    chr_hash: u32,
-    data_hash: u32,
-    msb_hash: u32,
-    entry_hash: u32,
-    entry_raw0: u64,
-    entry_raw1: u64,
-    los_target_distance: f32,
-    los_hit_mask: u32,
-    los_near_mask: u32,
-    los_block_mask: u32,
-    los_closest_hit_distance: f32,
-    los_block_filter: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -329,10 +242,9 @@ const IRONEYE_WEAKNESS_MARK_SCALE: f32 = 5.0;
 const IRONEYE_WEAKNESS_BURST_SPREAD_SECONDS: f32 = 0.35;
 const IRONEYE_WEAKNESS_BURST_HOLD_SECONDS: f32 = 0.25;
 const IRONEYE_WEAKNESS_BURST_FADE_SECONDS: f32 = 0.25;
-const IRONEYE_WEAKNESS_BURST_SECONDS: f32 =
-    IRONEYE_WEAKNESS_BURST_SPREAD_SECONDS
-        + IRONEYE_WEAKNESS_BURST_HOLD_SECONDS
-        + IRONEYE_WEAKNESS_BURST_FADE_SECONDS;
+const IRONEYE_WEAKNESS_BURST_SECONDS: f32 = IRONEYE_WEAKNESS_BURST_SPREAD_SECONDS
+    + IRONEYE_WEAKNESS_BURST_HOLD_SECONDS
+    + IRONEYE_WEAKNESS_BURST_FADE_SECONDS;
 const IRONEYE_RETICLE_HALF_SIZE: f32 = 46.0;
 const SP_STANDALONE_PRECISION_AIM: i32 = 883100;
 const SP_PRECISION_CALIBRATION: i32 = 883110;
@@ -595,4 +507,3 @@ impl RoleConfig {
 fn shared_effect(offset: i32) -> i32 {
     SHARED_EFFECT_BASE + offset
 }
-

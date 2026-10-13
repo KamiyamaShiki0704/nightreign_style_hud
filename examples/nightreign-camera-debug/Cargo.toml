@@ -7,9 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
-debug.workspace = true
-eldenring.workspace = true
-fromsoftware-shared.workspace = true
+shikifsrs-elden-ring.workspace = true
+shikifsrs-runtime.workspace = true
+shikifsrs-overlay.workspace = true
+windows.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-panic.workspace = true
@@ -17,6 +18,7 @@ tracing-subscriber.workspace = true
 
 [dependencies.hudhook]
 git = "https://github.com/veeenu/hudhook"
+rev = "53bbf504ecfe925003425bbf3912296ad66ad489"
 features = [
     "imgui-tables-api"
 ]
