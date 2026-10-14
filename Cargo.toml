@@ -20,9 +20,9 @@ repository = "https://github.com/KamiyamaShiki0704/nightreign_style_hud"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-shikifsrs-elden-ring = {git = "https://github.com/KamiyamaShiki0704/ShikiFSRS.git", rev = "930f818431e72209b49d2e37265a1f8150fa5390"}
-shikifsrs-runtime = {git = "https://github.com/KamiyamaShiki0704/ShikiFSRS.git", rev = "930f818431e72209b49d2e37265a1f8150fa5390"}
-shikifsrs-overlay = {git = "https://github.com/KamiyamaShiki0704/ShikiFSRS.git", rev = "930f818431e72209b49d2e37265a1f8150fa5390"}
+shikifsrs-elden-ring = {git = "https://github.com/KamiyamaShiki0704/ShikiFSRS.git", rev = "fb9f4524da1fb648e0a696f2d47aa08d3acf35cc"}
+shikifsrs-runtime = {git = "https://github.com/KamiyamaShiki0704/ShikiFSRS.git", rev = "fb9f4524da1fb648e0a696f2d47aa08d3acf35cc"}
+shikifsrs-overlay = {git = "https://github.com/KamiyamaShiki0704/ShikiFSRS.git", rev = "fb9f4524da1fb648e0a696f2d47aa08d3acf35cc"}
 bitflags = "2.11.0"
 thiserror = "1"
 tracing = "0.1"

@@ -9,7 +9,7 @@ This repository contains only the four DLL application crates:
 - `examples/nightreign-attack-summon`
 - `examples/nightreign-camera-debug`
 
-The runtime crates are fetched by Cargo from the private [ShikiFSRS](https://github.com/KamiyamaShiki0704/ShikiFSRS) repository, pinned to `930f818431e72209b49d2e37265a1f8150fa5390`. The build account needs repository read access and Git credentials. `Cargo.lock` records the same immutable revision.
+The runtime crates are fetched by Cargo from the [ShikiFSRS](https://github.com/KamiyamaShiki0704/ShikiFSRS) repository, pinned to `fb9f4524da1fb648e0a696f2d47aa08d3acf35cc`. `Cargo.lock` records the same immutable revision.
 
 ## Build
 
@@ -585,8 +585,8 @@ at your option.
   teammate-hit reflection can still be expanded.
 - Generated binaries and atlas previews are ignored by `.gitignore`.
 
-## Building with private ShikiFSRS
+## Building with ShikiFSRS
 
-Cargo pins `KamiyamaShiki0704/ShikiFSRS` to `930f818431e72209b49d2e37265a1f8150fa5390`. The SDK repository is private: the build account needs read access and Git credentials. `.cargo/config.toml` enables Git CLI fetching; no token is stored in this repository.
+Cargo pins `KamiyamaShiki0704/ShikiFSRS` to `fb9f4524da1fb648e0a696f2d47aa08d3acf35cc`. `.cargo/config.toml` enables Git CLI fetching; no token is stored in this repository.
 
 All four workspace members passed offline Release checks on ER WW 1.17.1 (EXE 2.7.1.0). Native ownership/phase/lifetime contracts and gameplay acceptance remain experimental. The independently reconstructed UI anchor retains marker features, but original tag/lock cache pixel alignment still needs manual acceptance.
