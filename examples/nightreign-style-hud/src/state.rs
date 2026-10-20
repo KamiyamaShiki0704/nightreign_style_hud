@@ -387,6 +387,7 @@ struct ChargeState {
     recluse_blood_debug: RecluseBloodDebug,
     recluse_blood_fixed_fp_accumulator: f32,
     recluse_outputs_clear_at: Option<Instant>,
+    recluse_map_refresh_cleanup_pending: bool,
     wylder_skill_lock_active: bool,
     wylder_skill_lock_has_target: bool,
     wylder_skill_lock_pos: Option<[f32; 2]>,
@@ -408,6 +409,7 @@ struct ChargeState {
     revenant_bind_baseline: Vec<FieldInsHandle>,
     revenant_pending_summon_bind: Option<usize>,
     revenant_map_refresh_cleanup_pending: bool,
+    revenant_cleanup_generation: u64,
     revenant_converted_souls: HashMap<u32, RevenantConvertedSoul>,
     revenant_debug_souls: Vec<RevenantDebugSoul>,
     revenant_pending_debug_soul: Option<RevenantPendingDebugSoul>,
@@ -445,6 +447,8 @@ struct RevenantDebugSoul {
     npc_id: i32,
     npc_param_id: i32,
     hide_at: Option<Instant>,
+    character: usize,
+    creator_previous: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -510,6 +514,7 @@ impl ChargeState {
             recluse_blood_debug: RecluseBloodDebug::default(),
             recluse_blood_fixed_fp_accumulator: 0.0,
             recluse_outputs_clear_at: None,
+            recluse_map_refresh_cleanup_pending: false,
             wylder_skill_lock_active: false,
             wylder_skill_lock_has_target: false,
             wylder_skill_lock_pos: None,
@@ -531,6 +536,7 @@ impl ChargeState {
             revenant_bind_baseline: Vec::new(),
             revenant_pending_summon_bind: None,
             revenant_map_refresh_cleanup_pending: false,
+            revenant_cleanup_generation: 0,
             revenant_converted_souls: HashMap::new(),
             revenant_debug_souls: Vec::new(),
             revenant_pending_debug_soul: None,
@@ -548,6 +554,7 @@ impl ChargeState {
 
         let world_chr_man = unsafe { WorldChrMan::instance_mut() }.ok()?;
         self.finish_revenant_map_refresh_cleanup(world_chr_man);
+        self.finish_recluse_map_refresh_cleanup(world_chr_man);
         let (
             active_effects,
             locked_on_enemy,
@@ -781,6 +788,47 @@ impl ChargeState {
 
     fn begin_map_refresh(&mut self) {
         self.reset_revenant_presence_for_map_refresh();
+        self.reset_recluse_for_map_refresh();
+    }
+
+    fn reset_recluse_for_map_refresh(&mut self) {
+        // Keys are native damage-module addresses and cannot cross map epochs.
+        if let Ok(mut elements) = RECLUSE_DAMAGE_ELEMENTS.lock() {
+            elements.clear();
+        }
+        self.recluse_elements = [None; 3];
+        self.recluse_ready_magic = None;
+        self.recluse_lock_element = None;
+        self.recluse_lock_damage_module = None;
+        self.recluse_lock_pos = None;
+        self.recluse_lock_debug_points = [None; 5];
+        self.recluse_outputs_clear_at = None;
+        self.recluse_map_refresh_cleanup_pending = true;
+    }
+
+    fn finish_recluse_map_refresh_cleanup(&mut self, world: &mut WorldChrMan) {
+        if !self.recluse_map_refresh_cleanup_pending { return; }
+        let Some(player) = world.main_player.as_mut() else { return; };
+        // Clear before collecting this player's active effects or consuming inputs.
+        clear_recluse_outputs(player, role_config(Role::Recluse));
+        self.recluse_map_refresh_cleanup_pending = false;
+    }
+
+    fn observe_revenant_cleanup_generation(&mut self) {
+        let generation = revenant_cleanup::generation();
+        if self.revenant_cleanup_generation != generation {
+            self.revenant_cleanup_generation = generation;
+            self.invalidate_revenant_passive_bindings();
+            self.reset_recluse_for_map_refresh();
+        }
+    }
+
+    fn invalidate_revenant_passive_bindings(&mut self) {
+        // Old handles/pointers may now name unrelated units. Never release them.
+        self.revenant_debug_souls.clear();
+        self.revenant_pending_debug_soul = None;
+        self.revenant_converted_souls.clear();
+        self.revenant_seen_deaths.clear();
     }
 
     fn reset_revenant_presence_for_map_refresh(&mut self) {
@@ -1088,7 +1136,7 @@ impl ChargeState {
         };
 
         let mut candidates = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
+        for entry in world_chr_man.chr_inses_by_distance().iter() {
             let chr = unsafe { entry.chr_ins.as_ref() };
             let handle = chr.field_ins_handle;
             if self.revenant_seen_deaths.contains(&handle) {
@@ -1148,29 +1196,35 @@ impl ChargeState {
             if soul.handle.is_none() {
                 if revenant_creator_request_consumed(
                     soul.creator_request_pending,
-                    world_chr_man.debug_chr_creator.spawn,
+                    world_chr_man.debug_chr_creator().spawn,
                 ) {
                     soul.creator_request_pending = false;
                 } else if soul.creator_request_pending {
                     continue;
-                } else if world_chr_man.debug_chr_creator.spawn {
+                } else if world_chr_man.debug_chr_creator().spawn {
                     continue;
                 }
 
-                if let Some(mut chr_ptr) = world_chr_man.debug_chr_creator.last_created_chr {
+                if let Some(mut chr_ptr) = world_chr_man.debug_chr_creator().last_created_chr {
                     let chr = unsafe { chr_ptr.as_mut() };
-                    if chr.npc_id == soul.npc_id && chr.npc_param_id == soul.npc_param_id {
+                    if revenant_created_soul_matches(soul, chr) {
                         prepare_revenant_debug_soul(chr);
                         request_revenant_debug_soul_animation(
                             chr,
                             REVENANT_CONVERTED_SOUL_APPEAR_ANIM_ID,
                         );
                         soul.handle = Some(chr.field_ins_handle);
+                        soul.character = chr as *mut ChrIns as usize;
                     }
                 }
             } else if let Some(handle) = soul.handle {
                 if let Some(chr) = revenant_debug_chr_by_handle_mut(world_chr_man, handle) {
-                    prepare_revenant_debug_soul(chr);
+                    // Initial binding may revive the new instance; maintenance must
+                    // not resurrect a dead soul before the removal pass below.
+                    if soul.character == chr as *mut ChrIns as usize
+                        && !revenant_converted_soul_should_disappear(chr) {
+                        prepare_revenant_debug_soul(chr);
+                    }
                 }
             }
         }
@@ -1181,7 +1235,8 @@ impl ChargeState {
             if let Some(hide_at) = soul.hide_at {
                 let died_while_hiding = soul.handle.map_or(false, |handle| {
                     revenant_debug_chr_by_handle(world_chr_man, handle)
-                        .map_or(true, revenant_converted_soul_should_disappear)
+                        .map_or(true, |chr| soul.character != chr as *const ChrIns as usize
+                            || revenant_converted_soul_should_disappear(chr))
                 });
                 if died_while_hiding || now >= hide_at {
                     let soul = self.revenant_debug_souls.swap_remove(index);
@@ -1197,7 +1252,8 @@ impl ChargeState {
             let expired_by_time = now >= soul.expires_at || timed_out_unbound;
             let died_or_missing = soul.handle.map_or(false, |handle| {
                     revenant_debug_chr_by_handle(world_chr_man, handle)
-                        .map_or(true, revenant_converted_soul_should_disappear)
+                        .map_or(true, |chr| soul.character != chr as *const ChrIns as usize
+                            || revenant_converted_soul_should_disappear(chr))
                 });
             if died_or_missing {
                 let soul = self.revenant_debug_souls.swap_remove(index);
@@ -1232,12 +1288,15 @@ impl ChargeState {
         let Some(pending) = self.revenant_pending_debug_soul else {
             return;
         };
+        if revenant_cleanup::pending() {
+            return;
+        }
         let has_unbound_request = self
             .revenant_debug_souls
             .iter()
             .any(|soul| soul.handle.is_none());
         if !revenant_debug_spawn_submission_ready(
-            world_chr_man.debug_chr_creator.spawn,
+            world_chr_man.debug_chr_creator().spawn,
             has_unbound_request,
             now,
             pending.ready_at,
@@ -1251,6 +1310,8 @@ impl ChargeState {
         }
 
         let candidate = pending.candidate;
+        let creator_previous = world_chr_man.debug_chr_creator().last_created_chr
+            .map_or(0, |chr| chr.as_ptr() as usize);
         world_chr_man.spawn_debug_character(&ChrDebugSpawnRequest {
             chr_id: candidate.npc_id,
             chara_init_param_id: 0,
@@ -1271,6 +1332,8 @@ impl ChargeState {
             npc_id: candidate.npc_id,
             npc_param_id: candidate.npc_param_id,
             hide_at: None,
+            character: 0,
+            creator_previous,
         });
         self.revenant_pending_debug_soul = None;
     }
@@ -1291,7 +1354,7 @@ impl ChargeState {
         }
 
         let mut candidates = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
+        for entry in world_chr_man.chr_inses_by_distance().iter() {
             let chr = unsafe { entry.chr_ins.as_ref() };
             let handle = chr.field_ins_handle;
             if self.revenant_seen_deaths.contains(&handle) {
@@ -1474,7 +1537,7 @@ impl ChargeState {
 
             let mut debug_candidate_score = f32::MAX;
             let mut scanned = 0usize;
-            for entry in world_chr_man.chr_inses_by_distance.iter() {
+            for entry in world_chr_man.chr_inses_by_distance().iter() {
                 if scanned >= SCHOLAR_SCAN_MAX_DISTANCE_ENTRIES {
                     break;
                 }
@@ -1775,7 +1838,7 @@ impl ChargeState {
     ) {
         let trigger = config.effect(SP_IRONEYE_WEAKNESS_TRIGGER);
         let mut handles = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
+        for entry in world_chr_man.chr_inses_by_distance().iter() {
             let chr = unsafe { entry.chr_ins.as_ref() };
             if scholar_reject_reason(chr).is_some() || !chr_has_speffect(chr, trigger) {
                 continue;
@@ -2065,7 +2128,7 @@ impl ChargeState {
         let brand_sp_effect = role_config(Role::Recluse).effect(SP_RECLUSE_BLOOD_SOUL_BRAND);
         let fixed_fp_sp_effect = SP_RECLUSE_BLOOD_SOUL_FIXED_FP_BRAND;
         let mut seen = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
+        for entry in world_chr_man.chr_inses_by_distance().iter() {
             let enemy = unsafe { entry.chr_ins.as_ref() };
             if scholar_reject_reason(enemy).is_some() {
                 continue;
@@ -2105,7 +2168,7 @@ impl ChargeState {
         }
 
         let mut seen = Vec::new();
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
+        for entry in world_chr_man.chr_inses_by_distance().iter() {
             let enemy = unsafe { entry.chr_ins.as_ref() };
             if scholar_reject_reason(enemy).is_some() {
                 continue;
@@ -2714,7 +2777,7 @@ impl ChargeState {
         let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
         let mut targets = Vec::new();
 
-        for entry in world_chr_man.chr_inses_by_distance.iter() {
+        for entry in world_chr_man.chr_inses_by_distance().iter() {
             let enemy = unsafe { entry.chr_ins.as_ref() };
             if scholar_reject_reason(enemy).is_some() {
                 continue;
@@ -3172,7 +3235,7 @@ fn wylder_skill_lock_enemy_target_pos(
     let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
     let mut scanned = 0usize;
     let mut best: Option<(WylderSkillLockTarget, f32)> = None;
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
+    for entry in world_chr_man.chr_inses_by_distance().iter() {
         if scanned >= WYLDER_SKILL_LOCK_MAX_DISTANCE_ENTRIES {
             break;
         }
@@ -3531,7 +3594,16 @@ fn revenant_passive_candidate_validation(
 
 fn revenant_converted_soul_should_disappear(chr: &ChrIns) -> bool {
     let data = chr.modules.as_ref().data.as_ref();
-    data.hp <= 0 || chr.chr_flags1c5.death_flag() || runtime_chr_character_disabled(chr)
+    revenant_soul_finished(data.hp, chr.chr_flags1c5.death_flag(), runtime_chr_character_disabled(chr))
+}
+
+fn revenant_soul_finished(hp: i32, death: bool, disabled: bool) -> bool {
+    hp <= 0 || death || disabled
+}
+
+fn revenant_created_soul_matches(soul: &RevenantDebugSoul, chr: &ChrIns) -> bool {
+    chr as *const ChrIns as usize != soul.creator_previous
+        && chr.npc_id == soul.npc_id && chr.npc_param_id == soul.npc_param_id
 }
 
 fn revenant_passive_roll(handle: FieldInsHandle, now: Instant) -> bool {
@@ -3644,11 +3716,17 @@ fn request_revenant_debug_soul_animation(chr: &mut ChrIns, anim_id: i32) {
 
 fn release_revenant_debug_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantDebugSoul) {
     let Some(handle) = soul.handle else {
+        // Role changes/timeouts can race creation. Retain the request until its
+        // result can be bound and retired, independently of the new role.
+        revenant_cleanup::stage_unbound(*soul);
         return;
     };
     let Some(chr) = revenant_debug_chr_by_handle_mut(world_chr_man, handle) else {
         return;
     };
+    if soul.character != chr as *mut ChrIns as usize {
+        return;
+    }
 
     let data = chr.modules.as_mut().data.as_mut();
     data.hp = 0;
@@ -3669,6 +3747,8 @@ fn release_revenant_debug_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantD
     chr.base_transparency_modifier = 0.0;
     chr.tint_alpha_multiplier = 0.0;
     chr.tint_alpha_multiplier_modifier = 0.0;
+    let character = chr as *mut ChrIns as usize;
+    revenant_cleanup::stage(world_chr_man, handle, character);
 }
 
 fn release_revenant_passive_soul(world_chr_man: &mut WorldChrMan, soul: &RevenantConvertedSoul) {
@@ -4251,7 +4331,7 @@ fn collect_scholar_links(
         }
     }
 
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
+    for entry in world_chr_man.chr_inses_by_distance().iter() {
         let chr = unsafe { entry.chr_ins.as_ref() };
         if chr_data_hp(chr) <= 0 {
             continue;
@@ -4366,7 +4446,7 @@ fn chr_has_speffect(chr: &ChrIns, sp_effect: i32) -> bool {
 fn wylder_hookshot_target_result(
     world_chr_man: &WorldChrMan,
 ) -> Option<(FieldInsHandle, WylderHookshotNativeResult)> {
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
+    for entry in world_chr_man.chr_inses_by_distance().iter() {
         let chr = unsafe { entry.chr_ins.as_ref() };
         let result = if chr_has_speffect(chr, SP_WYLDER_HOOKSHOT_IMPACT_ACCEPTED) {
             WylderHookshotNativeResult::PullEnemy

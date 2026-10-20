@@ -20,9 +20,9 @@ repository = "https://github.com/KamiyamaShiki0704/nightreign_style_hud"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-fromsoftware-shared = { git = "https://github.com/KamiyamaShiki0704/fromsoftware-rs", rev = "3c8c1d7633a99309fb004c9f894ea10b7967d0e0", package = "fromsoftware-shared" }
-eldenring = { git = "https://github.com/KamiyamaShiki0704/fromsoftware-rs", rev = "3c8c1d7633a99309fb004c9f894ea10b7967d0e0", package = "eldenring" }
-debug = { git = "https://github.com/KamiyamaShiki0704/fromsoftware-rs", rev = "3c8c1d7633a99309fb004c9f894ea10b7967d0e0", package = "debug" }
+fromsoftware-shared = { path = "../fromsoftware-rs/crates/shared" }
+eldenring = { path = "../fromsoftware-rs/crates/eldenring" }
+debug = { path = "../fromsoftware-rs/crates/debug" }
 bitflags = "2.11.0"
 thiserror = "1"
 tracing = "0.1"

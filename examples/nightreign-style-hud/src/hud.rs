@@ -1,12 +1,14 @@
 #[unsafe(no_mangle)]
 /// # Safety
 pub unsafe extern "C" fn DllMain(hmodule: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
-    debug::initialize::<ImguiDx12Hooks>(
+    revenant_cleanup::MODULE.store(hmodule.0 as usize, Ordering::Relaxed);
+    debug::initialize_checked::<ImguiDx12Hooks>(
         hmodule,
         reason,
         || {
+            eldenring::initialize_game_bindings()?;
             wait_for_system_init(&Program::current(), Duration::MAX)
-                .expect("Timeout waiting for system init");
+                .map_err(|error| error.to_string())
         },
         NightreignStyleHud::new(),
     )
@@ -87,6 +89,8 @@ impl ImguiRenderLoop for NightreignStyleHud {
     }
 
     fn render(&mut self, ui: &mut Ui) {
+        let Ok(_native_access) = revenant_cleanup::ACCESS.lock() else { return };
+        revenant_cleanup::observe_session();
         let viewport = ui.io().display_size;
         self.update_scale(viewport);
 
@@ -95,6 +99,7 @@ impl ImguiRenderLoop for NightreignStyleHud {
         if game_state.loading_cycle_changed {
             self.charges.begin_map_refresh();
         }
+        self.charges.observe_revenant_cleanup_generation();
         if game_state.hidden {
             return;
         }
@@ -292,7 +297,107 @@ struct HudGameState {
     loading_cycle_changed: bool,
 }
 
+#[cfg(test)]
+mod map_refresh_regression_tests {
+    use super::*;
+
+    #[test]
+    fn normal_game_hud_does_not_require_revenant_cleanup_session() {
+        let now = Instant::now();
+        let mut gate = LoadingHudGate { last_menu_load_counter: None, hide_until: now };
+        // The production render decision takes no cleanup-availability input.
+        assert!(!gate.observe_state(Some(2), Some(false), false, now).hidden,
+            "normal gameplay HUD disappeared because passive cleanup reported no session");
+    }
+
+    #[test]
+    fn refresh_clears_recluse_slots_and_prepared_magic() {
+        let now = Instant::now();
+        let mut state = ChargeState::new(now);
+        state.reset_for_role(Some(Role::Recluse));
+        state.push_recluse_element(RecluseElement::Magic);
+        state.push_recluse_element(RecluseElement::Fire);
+        state.push_recluse_element(RecluseElement::Holy);
+        state.recluse_ready_magic = state.recluse_magic_index();
+        assert!(state.recluse_ready_magic.is_some());
+        state.begin_map_refresh();
+        assert!(state.recluse_elements.iter().all(Option::is_none),
+            "refresh retained filled Recluse slots");
+        assert!(state.recluse_ready_magic.is_none());
+    }
+
+    #[test]
+    fn long_loading_stays_hidden_then_restores_after_completion() {
+        let now = Instant::now();
+        let mut gate = LoadingHudGate { last_menu_load_counter: None, hide_until: now };
+        assert!(!gate.observe_state(Some(2), Some(false), false, now).hidden);
+        let begin = gate.observe_state(Some(3), Some(true), false, now);
+        assert!(begin.hidden && begin.loading_cycle_changed);
+        // The captured load lasted ~3.8s. The native FE state is deliberately
+        // permissive here: the loading request alone must hide beyond 1.5s.
+        let during = gate.observe_state(Some(3), Some(true), false, now + Duration::from_secs(3));
+        assert!(during.hidden && !during.loading_cycle_changed);
+        assert!(!gate.observe_state(Some(3), Some(false), false, now + Duration::from_secs(4)).hidden);
+    }
+
+    #[test]
+    fn initial_observation_during_loading_is_hidden_without_counter_change() {
+        let now = Instant::now();
+        let mut gate = LoadingHudGate { last_menu_load_counter: None, hide_until: now };
+        let state = gate.observe_state(Some(3), Some(true), false, now);
+        assert!(state.hidden);
+        assert!(!state.loading_cycle_changed);
+    }
+
+    #[test]
+    fn ordinary_menu_keeps_elements_and_does_not_request_map_cleanup() {
+        let now = Instant::now();
+        let mut gate = LoadingHudGate { last_menu_load_counter: Some(3), hide_until: now };
+        let mut charges = ChargeState::new(now);
+        charges.push_recluse_element(RecluseElement::Fire);
+        for menu_open in [true, false] {
+            let state = gate.observe_state(Some(3), Some(false), menu_open, now);
+            if state.loading_cycle_changed { charges.begin_map_refresh(); }
+            assert_eq!(state.hidden, menu_open);
+            assert!(charges.recluse_elements == [Some(RecluseElement::Fire), None, None]);
+            assert!(!charges.recluse_map_refresh_cleanup_pending);
+        }
+    }
+
+    #[test]
+    fn refresh_clears_partial_slots_and_old_target_then_allows_refill() {
+        let now = Instant::now();
+        for count in 1..=3 {
+            let mut state = ChargeState::new(now);
+            for _ in 0..count { state.push_recluse_element(RecluseElement::Magic); }
+            state.recluse_lock_element = Some(RecluseElement::Magic);
+            state.recluse_lock_damage_module = Some(0x1234);
+            record_recluse_damage_element(0x1234, RecluseElement::Magic);
+            state.recluse_outputs_clear_at = Some(now + Duration::from_secs(5));
+            state.revenant_summon_hp = [0.25, 0.5, 0.75];
+            state.begin_map_refresh();
+            assert!(state.recluse_elements == [None; 3]);
+            assert!(state.recluse_lock_element.is_none());
+            assert!(state.recluse_lock_damage_module.is_none());
+            assert!(lookup_recluse_damage_element(0x1234).is_none());
+            assert!(state.recluse_outputs_clear_at.is_none());
+            assert!(state.recluse_map_refresh_cleanup_pending);
+            assert_eq!(state.revenant_summon_hp, [0.25, 0.5, 0.75]);
+            state.push_recluse_element(RecluseElement::Fire);
+            assert!(state.recluse_elements == [Some(RecluseElement::Fire), None, None]);
+        }
+    }
+}
+
 impl LoadingHudGate {
+    fn observe_state(&mut self, counter: Option<i32>, loading: Option<bool>, native_hidden: bool, now: Instant) -> HudGameState {
+        let loading_cycle_changed = counter.is_some_and(|counter| self.observe_menu_load_counter(counter, now));
+        HudGameState {
+            hidden: loading == Some(true) || native_hidden || now < self.hide_until,
+            loading_cycle_changed,
+        }
+    }
+
     fn observe_menu_load_counter(&mut self, counter: i32, now: Instant) -> bool {
         match self.last_menu_load_counter {
             Some(previous) if previous != counter => {
@@ -355,24 +460,15 @@ static LOADING_HUD_GATE: LazyLock<Mutex<LoadingHudGate>> = LazyLock::new(|| {
 const HUD_LOADING_HIDE_GRACE_SECONDS: f32 = 1.5;
 
 fn hud_game_state(now: Instant) -> HudGameState {
-    let mut state = HudGameState::default();
-
-    if let Ok(loading) = unsafe { CSNowLoadingHelper::instance() } {
-        if let Ok(mut gate) = LOADING_HUD_GATE.lock() {
-            state.loading_cycle_changed =
-                gate.observe_menu_load_counter(loading.menu_load_counter, now);
-            state.hidden = now < gate.hide_until;
-        }
-    }
-
-    if unsafe { CSFeManImp::instance() }
+    let counter = unsafe { CSNowLoadingHelper::instance() }.ok().map(|loading| loading.menu_load_counter);
+    let loading = loading_state::screen_active();
+    let native_hidden = unsafe { CSFeManImp::instance() }
         .map(|fe_man| fe_man.hud_state != CSFeManHudState::Default)
-        .unwrap_or(false)
-    {
-        state.hidden = true;
+        .unwrap_or(false);
+    if let Ok(mut gate) = LOADING_HUD_GATE.lock() {
+        return gate.observe_state(counter, loading, native_hidden, now);
     }
-
-    state
+    HudGameState { hidden: true, loading_cycle_changed: false }
 }
 
 #[cfg(test)]

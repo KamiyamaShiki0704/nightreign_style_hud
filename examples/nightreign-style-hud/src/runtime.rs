@@ -120,6 +120,12 @@ fn install_ironeye_runtime_tasks_once() {
         std::mem::forget(menu_man);
         std::mem::forget(post_scaleform);
         std::mem::forget(draw_pre);
+        let retirement = task_imp.run_recurring(
+            revenant_cleanup::frame_end as fn(&FD4TaskData),
+            CSTaskGroupIndex::FrameEnd,
+        );
+        std::mem::forget(retirement);
+        revenant_cleanup::installed();
         append_damage_log("[init] ironeye runtime tasks installed");
     });
 }
@@ -468,7 +474,7 @@ fn ironeye_camera_debug_lines() -> Option<[String; 3]> {
         return None;
     }
     let camera = unsafe { CSCamera::instance() }.ok()?;
-    let chr_cam = world_chr_man.chr_cam.map(|ptr| unsafe { ptr.as_ref() });
+    let chr_cam = world_chr_man.chr_cam().map(|ptr| unsafe { ptr.as_ref() });
     let game_man = unsafe { GameMan::instance() }.ok();
     let manual = player
         .chr_ins
@@ -548,7 +554,7 @@ fn remember_normal_camera_fov() {
     let chr = (unsafe { WorldChrMan::instance() })
         .ok()
         .and_then(|world_chr_man| {
-            let chr_cam = world_chr_man.chr_cam?;
+            let chr_cam = world_chr_man.chr_cam()?;
             let chr_cam = unsafe { chr_cam.as_ref() };
             Some([
                 chr_cam.pers_cam.fov,
@@ -593,7 +599,7 @@ fn restore_normal_camera_fov() {
     let Ok(world_chr_man) = (unsafe { WorldChrMan::instance_mut() }) else {
         return;
     };
-    let Some(mut chr_cam) = world_chr_man.chr_cam else {
+    let Some(mut chr_cam) = world_chr_man.chr_cam() else {
         return;
     };
     let chr_cam = unsafe { chr_cam.as_mut() };

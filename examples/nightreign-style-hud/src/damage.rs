@@ -324,6 +324,9 @@ fn install_damage_hook_once() {
 
 fn install_undertaker_auto_dodge_hook_once() {
     INSTALL_UNDERTAKER_AUTO_DODGE_HOOK.call_once(|| {
+        UNDERTAKER_RECEIVED_DIRECTION_AVAILABLE.store(
+            received_direction_layout_verified(Program::current()), Ordering::Release,
+        );
         let program = Program::current();
         let Some(dispatch_rva) = find_undertaker_hit_dispatch_pattern(program) else {
             append_damage_log("[init] Undertaker HitIns dispatcher pattern was not unique");
@@ -397,7 +400,10 @@ fn undertaker_hit_dispatch_destination(
             reject_undertaker_hit_dispatch as *const () as usize
         }
         UndertakerHitDispatchAction::Trigger => {
-            let pending_hit = capture_undertaker_pending_attack(damage_data);
+            let pending_hit = pending_hit_with_received_direction(
+                capture_undertaker_pending_attack(damage_data),
+                capture_undertaker_received_direction(target_damage_module, damage_data),
+            );
             if UNDERTAKER_AUTO_DODGE_PENDING_HIT
                 .compare_exchange(0, pending_hit, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -574,7 +580,10 @@ fn pack_undertaker_pending_attack(row_id: i32, table: i32) -> u64 {
 }
 
 fn unpack_undertaker_pending_attack(pending_hit: u64) -> Option<(u32, u32)> {
-    let row_id = pending_hit >> 2;
+    if pending_hit & !(UNDERTAKER_PENDING_ATK_MASK | UNDERTAKER_PENDING_BEARING_MASK) != 0 {
+        return None;
+    }
+    let row_id = (pending_hit & UNDERTAKER_PENDING_ATK_MASK) >> 2;
     let tag = pending_hit & 3;
     if row_id > i32::MAX as u64 || tag < 2 {
         return None;
@@ -585,20 +594,20 @@ fn unpack_undertaker_pending_attack(pending_hit: u64) -> Option<(u32, u32)> {
 fn undertaker_dodge_effects(
     pending_hit: u64,
     read_direction: impl FnOnce(u32, u32) -> Option<i8>,
-) -> [Option<i32>; 2] {
+) -> [Option<i32>; 3] {
     if pending_hit == 0 {
-        return [None, None];
+        return [None, None, None];
     }
     let direction_effect = unpack_undertaker_pending_attack(pending_hit)
         .and_then(|(table, row_id)| read_direction(table, row_id))
         .and_then(|direction| usize::try_from(direction).ok())
         .and_then(|direction| SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS.get(direction).copied());
-    [direction_effect, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)]
+    [direction_effect, pending_received_direction_effect(pending_hit), Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)]
 }
 
 fn clear_undertaker_dodge_effects(player: &mut PlayerIns) {
     player.chr_ins.remove_speffect(SP_UNDERTAKER_AUTO_DODGE_TRIGGER);
-    for effect in SP_UNDERTAKER_AUTO_DODGE_DIRECTIONS {
+    for effect in undertaker_direction_cleanup_effects() {
         player.chr_ins.remove_speffect(effect);
     }
 }
@@ -1317,7 +1326,7 @@ fn multi_lock_targets_for_player(
 
     let player_pos = player.chr_ins.modules.as_ref().physics.as_ref().position;
     let mut scanned = 0usize;
-    for entry in world_chr_man.chr_inses_by_distance.iter() {
+    for entry in world_chr_man.chr_inses_by_distance().iter() {
         if targets.len() >= target_limit || scanned >= MULTI_LOCK_BULLET_SCAN_MAX_ENTRIES {
             break;
         }
@@ -2839,7 +2848,7 @@ mod undertaker_auto_dodge_tests {
             };
             assert_eq!(
                 undertaker_dodge_effects(pack_undertaker_pending_attack(100, 0), |_, _| Some(direction)),
-                [expected, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)],
+                [expected, None, Some(SP_UNDERTAKER_AUTO_DODGE_TRIGGER)],
             );
         }
     }
@@ -2857,20 +2866,20 @@ mod undertaker_auto_dodge_tests {
                 }
             });
             assert_eq!(calls, 1);
-            assert_eq!(effects, [Some(expected), Some(880922)]);
+            assert_eq!(effects, [Some(expected), None, Some(880922)]);
         }
     }
 
     #[test]
     fn unknown_or_missing_attack_keeps_only_generic_and_empty_queue_does_nothing() {
-        assert_eq!(undertaker_dodge_effects(0, |_, _| panic!("empty queue lookup")), [None, None]);
+        assert_eq!(undertaker_dodge_effects(0, |_, _| panic!("empty queue lookup")), [None, None, None]);
         assert_eq!(
             undertaker_dodge_effects(UNDERTAKER_PENDING_UNKNOWN_ATTACK, |_, _| panic!("unknown key lookup")),
-            [None, Some(880922)],
+            [None, None, Some(880922)],
         );
         assert_eq!(
             undertaker_dodge_effects(pack_undertaker_pending_attack(100, 0), |_, _| None),
-            [None, Some(880922)],
+            [None, None, Some(880922)],
         );
     }
 

@@ -1,3 +1,5 @@
+> 2026-10-21 compatibility build: ER App 1.17.2 / EXE 2.7.2.0. The candidate in `dist/er-1.17.2/` passed automated checks and is installed in the main `_GoldenAge` Mod. In-game acceptance is pending. Current spec, hashes, rollback and evidence: [1.17.2 build record](../../Topics/Gameplay/bug-er-1-17-2-dll-compat/build.md). Earlier version/publication notes below retain their original scope.
+
 # Nightreign Style HUD
 
 Experimental Elden Ring / Nightreign-style HUD DLL built on top of `fromsoftware-rs`.
@@ -56,6 +58,15 @@ assumed without a verified executable. See the
 [compatibility audit](docs/compatibility/er-1.17.1-20260908.md).
 
 ## Runtime Overview
+
+### Local HUD / map-refresh fix (2026-09-24)
+
+On verified WW 2.7.1.0, HUD visibility uses the native loading request throughout
+the loading screen. Passive retirement availability no longer hides the entire
+HUD. Map refresh clears Recluse elements, prepared magic and stale target caches;
+native output cleanup waits for the new player. Opening ordinary menus preserves
+the slots. See [diagnosis and validation](docs/hud-map-refresh/build.md) for local
+build/deployment status and the user's in-game acceptance of these fixes.
 
 The DLL reads player and enemy state every frame, draws the custom HUD with
 `hudhook`, and uses Speffects as the main bridge between parameter-side logic,
@@ -320,6 +331,21 @@ runtime writes `880005` for ultimate readiness.
   - Disappear animation: `1840`.
   - Current implementation uses the entity route; the older passive Buddy route
     is disabled.
+  - On WW App Ver. 1.17.1, passive entities now use the verified Summon cleanup
+    implementation: after death, expiry (including the existing 1s exit-animation
+    wait), or role change, unregister and detach at FrameEnd, wait for native
+    references to drain for two observations, then destruct and free through
+    the owning allocator. This is built locally and awaits in-game acceptance.
+  - Cleanup continues after leaving Revenant, including a creation request that
+    had not yet bound. New passive spawns wait while retirement is pending.
+  - Loading/world/player transitions invalidate old bindings. Detached objects
+    that can no longer be safely released are retained until process exit;
+    this does not unload model caches or remove bullets.
+  - The DLL writes `nightreign_revenant_cleanup.log` beside itself. A completed
+    free is `outcome=destroyed retirement=frame-end-drained`; `phase=staged`
+    or `phase=detached` alone does not prove memory was released.
+  - This code is included in the HUD DLL; installing Summon separately is not
+    required for the passive cleanup. See [the build record](docs/revenant-passive-retirement/build.md).
 
 ### Recluse
 
@@ -427,7 +453,7 @@ runtime writes `880005` for ultimate readiness.
 
     `880922` remains the common request for every dodge. A known direction
     applies exactly one additional marker **before** `880922`; unknown values
-    or missing attack data produce only `880922`. Both kinds of output last
+    or missing attack data produce no Atk direction marker. These outputs last
     0.5s in the supplied CSV. Import `880930..880934` from
     [Param_csv/Speffect.csv](Param_csv/Speffect.csv) into active Regulation.
     When HKS handles `880922`, inspect the direction marker first, select your
@@ -442,6 +468,34 @@ runtime writes `880005` for ultimate readiness.
     The DLL keeps only the contact's table/ID and performs one indexed lookup
     on behavior processing, with no per-frame attack-table scan. Sensor range,
     suppression and rearm remain 0.40m, 650ms and 900ms respectively.
+  - Development build: independent **received-damage bearing** outputs are
+    available on verified Worldwide ER 1.17.1 (EXE 2.7.1.0):
+
+    | Incoming side relative to player | Native HKS direction | Player SpEffect |
+    | --- | --- | --- |
+    | Front | `2` | `880935` |
+    | Back | `3` | `880936` |
+    | Left | `0` | `880937` |
+    | Right | `1` | `880938` |
+
+    Import these four neutral 0.5s rows from `Param_csv/Speffect.csv`. At the
+    first accepted contact, the DLL snapshots the native incoming vector and
+    player's interpolated rotation, classifies it using the identified native
+    direction math, and publishes one bearing marker before `880922`.
+    This is independent of the Atk direction above, and describes the incoming
+    side, **not a prescribed dodge direction**. HKS chooses the animation.
+    Subsequent rotation/contacts cannot overwrite that captured result.
+
+    No normal damage processing is executed and `GetReceivedDamageDirection`
+    itself is not overridden; that getter can still contain old received state.
+    Inspect the new SpEffects when handling `880922`, not the native getter.
+    Invalid/vertical/zero vectors or unverified executable layouts yield no
+    bearing marker, while the existing trigger/Atk behavior is preserved.
+    New requests and enhanced-skill exit clear all nine direction markers.
+    No debug HUD is added. This new feature is NOT in compatibility release
+    v0.3.2; in-game melee/projectile/side/cleanup acceptance remains pending.
+    Special native branches may change data after our entry snapshot, so full
+    equality with every normal-pipeline getter result is not yet claimed.
 - Ultimate:
   - Discounted use supported.
   - Use shared notifications `880021`/`880022`. The old Undertaker aliases

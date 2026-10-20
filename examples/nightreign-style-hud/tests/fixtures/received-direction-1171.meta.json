@@ -1,0 +1,34 @@
+{
+  "exe_sha256": "1A3547101327F65D0C76DA2F9190AC0AA66871EA42BAE2AECC61E11A8B597891",
+  "seed": "0x11712710",
+  "rows": 1176,
+  "categories": {
+    "arbitrary": 512,
+    "cardinal": 4,
+    "identity-diagonal-ulp": 20,
+    "rotated-diagonal": 640
+  },
+  "format": "header + 9 tab-separated columns; decimal f32 roundtrip; expected native u8",
+  "helper_rvas": [
+    "0x3C6D40",
+    "0x405090",
+    "0x4052C0"
+  ],
+  "init_rvas": [
+    "0x93DF0",
+    "0x105DF0",
+    "0x105E20"
+  ],
+  "fingerprints": {
+    "0x445ef9": "488d9ec0010000",
+    "0x3c6d5f": "488b4110488bda488b8890010000488b4968",
+    "0x45eca0": "488d4160c3",
+    "0x4106c9": "f20f104138"
+  },
+  "corpus_sha256": "8073a880bd726fb3fd9a66683a72e5eec7f3f67566a5baa7e9c6746586d86646",
+  "reviewed_rust_sha256": "19ac775fe5ab4f38c323f16e6be32576d47eea06639e960f89f56aa50f6a582b",
+  "scalar_transcription_enum_mismatches": [],
+  "scalar_transcription_facing_mismatches": [],
+  "limitation": "transcription comparison is not execution of Rust; parent tests real Rust",
+  "validity": "finite, near-unit quaternion, nonzero finite horizontal facing/payload; no invalid rows"
+}

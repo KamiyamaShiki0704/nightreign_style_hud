@@ -32,7 +32,21 @@ use hudhook::{
 use image::io::Reader as ImageReader;
 use pelite::pe64::{Pe, PeObject};
 
+// Native implementation pinned from ER_Summon 01491ed; see retirement design.
+#[allow(dead_code)]
+mod chr_lifecycle;
+mod loading_state;
+mod retirement;
+mod revenant_cleanup;
+#[cfg(test)]
+mod revenant_cleanup_tests;
+
+fn log_line(message: impl std::fmt::Display) {
+    revenant_cleanup::log(message);
+}
+
 include!("runtime_layout.rs");
+include!("received_direction.rs");
 include!("damage.rs");
 include!("hud.rs");
 include!("roles.rs");
